@@ -15,6 +15,8 @@
 #include <esp_matter_ota.h>
 
 #include <common_macros.h>
+#include <log_heap_numbers.h>
+
 #include <app_priv.h>
 #include <app_reset.h>
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
@@ -83,6 +85,7 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 
     case chip::DeviceLayer::DeviceEventType::kCommissioningComplete:
         ESP_LOGI(TAG, "Commissioning complete");
+        MEMORY_PROFILER_DUMP_HEAP_STAT("commissioning complete");
         break;
 
     case chip::DeviceLayer::DeviceEventType::kFailSafeTimerExpired:
@@ -99,6 +102,7 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 
     case chip::DeviceLayer::DeviceEventType::kCommissioningWindowOpened:
         ESP_LOGI(TAG, "Commissioning window opened");
+        MEMORY_PROFILER_DUMP_HEAP_STAT("commissioning window opened");
         break;
 
     case chip::DeviceLayer::DeviceEventType::kCommissioningWindowClosed:
@@ -142,6 +146,7 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 
     case chip::DeviceLayer::DeviceEventType::kBLEDeinitialized:
         ESP_LOGI(TAG, "BLE deinitialized and memory reclaimed");
+        MEMORY_PROFILER_DUMP_HEAP_STAT("BLE deinitialized");
         break;
 
     default:
@@ -312,6 +317,8 @@ extern "C" void app_main()
     node_t *node = node::create(&node_config, app_attribute_update_cb, app_identification_cb);
     ABORT_APP_ON_FAILURE(node != nullptr, ESP_LOGE(TAG, "Failed to create Matter node"));
 
+    MEMORY_PROFILER_DUMP_HEAP_STAT("node created");
+
     ConfigureGeneralDiagnosticsCluster(node);
     AddSoftwareDiagnosticsCluster(node);
 
@@ -375,6 +382,8 @@ extern "C" void app_main()
     err = esp_matter::start(app_event_cb);
     ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to start Matter, err:%d", err));
 
+    MEMORY_PROFILER_DUMP_HEAP_STAT("matter started");
+    
     /* Starting driver with default values */
     app_driver_light_set_defaults(light_endpoint_id);
 
