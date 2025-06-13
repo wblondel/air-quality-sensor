@@ -247,7 +247,7 @@ void AddWiFidNetworkDiagnosticsCluster(node_t* node)
     cluster::wifi_network_diagnostics::feature::error_counts::add(cluster);
 
     // PacketCounts (PKTCNT)
-    cluster::wifi_network_diagnostics::feature::packets_counts::add(cluster);
+    cluster::wifi_network_diagnostics::feature::packet_counts::add(cluster);
 }
 
 void ConfigureGeneralDiagnosticsCluster(node_t* node)
