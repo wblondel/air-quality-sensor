@@ -1,40 +1,17 @@
-# Light
+# matter-air-quality-esp32
 
-This example creates a Color Temperature Light device using the ESP
-Matter data model.
+Thank you to [Olav Tollefsen](https://www.linkedin.com/in/olavtollefsen/) for sharing [his project](https://github.com/olavt/matter-air-quality-esp32).
 
-See the [docs](https://docs.espressif.com/projects/esp-matter/en/latest/esp32/developing.html) for more information about building and flashing the firmware.
+## Dependencies used
 
-## 1. Additional Environment Setup
+This project was successfully built with :
+- [ESP-IDF](https://github.com/espressif/esp-idf) [v5.4.1](https://github.com/espressif/esp-idf/tree/v5.4.1)
+- [ESP-Matter](https://github.com/espressif/esp-matter) [@080c9e7](https://github.com/espressif/esp-matter/tree/080c9e7efc00edf6431a286870ae6cf24fa1f96f)
 
-No additional setup is required.
-
-## 2. Post Commissioning Setup
-
-No additional setup is required.
-
-## 3. Device Performance
-
-### 3.1 Memory usage
-
-The following is the Memory and Flash Usage.
-
--   `Bootup` == Device just finished booting up. Device is not
-    commissionined or connected to wifi yet.
--   `After Commissioning` == Device is conneted to wifi and is also
-    commissioned and is rebooted.
--   device used: esp32c3_devkit_m
--   tested on:
-    [6a244a7](https://github.com/espressif/esp-matter/commit/6a244a7b1e5c70b0aa1bf57254f19718b0755d95)
-    (2022-06-16)
-
-|                         | Bootup | After Commissioning |
-|:-                       |:-:     |:-:                  |
-|**Free Internal Memory** |108KB   |105KB                |
-
-**Flash Usage**: Firmware binary size: 1.26MB
-
-This should give you a good idea about the amount of free memory that is
-available for you to run your application's code.
-
-Applications that do not require BLE post commissioning, can disable it using app_ble_disable() once commissioning is complete. It is not done explicitly because of a known issue with esp32c3 and will be fixed with the next IDF release (v4.4.2).
+on a MacBook Pro M1 running macOS Sequoia 15.5 with :
+- cmake 4.0.2
+- ninja 1.12.1
+- Python 3.13.5
+- Git 2.49.0
+- dfu-util 0.11
+- ccache 4.11.3_1
