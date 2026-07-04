@@ -121,6 +121,12 @@ int SensirionSEN66::ActivateAutomaticSelfCalibration()
   return status;
 }
 
+int SensirionSEN66::StartFanCleaning()
+{
+  int16_t status = sen66_start_fan_cleaning();
+  return status;
+}
+
 std::string SensirionSEN66::GetProductName()
 {
   return "SEN66";

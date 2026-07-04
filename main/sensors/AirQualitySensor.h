@@ -45,6 +45,9 @@ public:
 
     virtual int SetAmbientPressure(float ambientPressureKiloPascal) = 0;
 
+    // Starts the fan cleaning cycle, if the sensor supports it
+    virtual int StartFanCleaning() { return -1; }
+
 protected:
 
     virtual int SetAltitude(float altitude) = 0;

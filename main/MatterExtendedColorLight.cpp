@@ -23,20 +23,10 @@ std::shared_ptr<MatterExtendedColorLight> MatterExtendedColorLight::CreateEndpoi
     }
 
     extended_color_light::config_t light_config;
-    light_config.on_off.features.lighting.start_up_on_off = nullptr;
-    light_config.level_control.features.lighting.start_up_current_level = nullptr;
+    light_config.on_off_lighting.start_up_on_off = nullptr;
+    light_config.level_control_lighting.start_up_current_level = nullptr;
     light_config.color_control.color_mode = (uint8_t)ColorControl::ColorMode::kCurrentHueAndCurrentSaturation;
     light_config.color_control.enhanced_color_mode = (uint8_t)ColorControl::ColorMode::kCurrentHueAndCurrentSaturation;
-    
-
-    // Set the feature flags for the On Off cluster
-    light_config.on_off.feature_flags = cluster::on_off::feature::lighting::get_id();
-
-    // Set the feature flags for the Level Control cluster
-    light_config.level_control.feature_flags = cluster::level_control::feature::lighting::get_id();
-
-    // Set the feature flags for the Color Control cluster
-    light_config.color_control.feature_flags = cluster::color_control::feature::hue_saturation::get_id();
 
     // Create Extended Color Light Endpoint
     ESP_LOGI(TAG, "Creating extended color light endpoint");
@@ -46,6 +36,12 @@ std::shared_ptr<MatterExtendedColorLight> MatterExtendedColorLight::CreateEndpoi
         ESP_LOGE(TAG, "Failed to create extended color light endpoint");
         return nullptr;
     }
+
+    // Add the HueSaturation feature to the Color Control cluster (the endpoint
+    // config only covers the ColorTemperature and XY features)
+    cluster_t* color_control_cluster = cluster::get(endpoint, ColorControl::Id);
+    cluster::color_control::feature::hue_saturation::config_t hue_saturation_config;
+    cluster::color_control::feature::hue_saturation::add(color_control_cluster, &hue_saturation_config);
 
     ESP_LOGI(TAG, "Created extended color light endpoint");
 

@@ -48,4 +48,10 @@ class MatterEndpoint
 
         endpoint_t* m_endpoint;
 
+    private:
+
+        // Updates a numeric attribute using the value type the attribute was
+        // registered with (plain, nullable, enum or bitmap variants)
+        void UpdateAttributeValueScalar(uint32_t cluster_id, uint32_t attribute_id, double value);
+
 };

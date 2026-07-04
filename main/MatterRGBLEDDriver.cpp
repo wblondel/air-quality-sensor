@@ -2,6 +2,7 @@
 #include <device.h>
 #include <led_driver.h>
 #include <esp_matter.h>
+#include <common_macros.h>
 
 using namespace esp_matter;
 

@@ -42,6 +42,14 @@ using namespace chip::DeviceLayer;
 #include "MatterHumiditySensor.h"
 #include "MatterTemperatureSensor.h"
 #include "SensirionSEN66.h"
+#include "LCD2004.h"
+
+#include <driver/i2c_master.h>
+#include <cmath>
+#include <cstring>
+#include <esp_app_desc.h>
+#include <iot_button.h>
+#include <button_gpio.h>
 
 static constexpr uint32_t MEASUREMENT_SAMPLE_SECONDS = 60;
 
@@ -51,6 +59,8 @@ std::shared_ptr<MatterExtendedColorLight> matterExtendedColorLight;
 std::shared_ptr<MatterTemperatureSensor> matterTemperatureSensor;
 std::shared_ptr<MatterHumiditySensor> matterHumiditySensor;
 esp_timer_handle_t sensor_timer_handle;
+static std::shared_ptr<AirQualitySensor> airQualitySensor;
+static LCD2004* lcd = nullptr;
 
 static const char *TAG = "app_main";
 uint16_t light_endpoint_id = 0;
@@ -77,12 +87,630 @@ static const char *s_decryption_key = decryption_key_start;
 static const uint16_t s_decryption_key_len = decryption_key_end - decryption_key_start;
 #endif // CONFIG_ENABLE_ENCRYPTED_OTA
 
+struct DisplayReadings {
+    bool valid = false;
+    float temperature = NAN, humidity = NAN, co2 = NAN, voc = NAN, nox = NAN;
+    float pm1 = NAN, pm25 = NAN, pm4 = NAN, pm10 = NAN;
+};
+
+enum DisplayPage {
+    kPageLive = 0,
+    kPageParticles,
+    kPageMinMax,
+    kPageCo2Chart,
+    kPageCo2Big,
+    kPageSystem,
+    kDisplayPageCount,
+};
+
+static DisplayReadings s_readings;
+static DisplayReadings s_prevReadings;
+static DisplayReadings s_minReadings;
+static DisplayReadings s_maxReadings;
+static int s_displayPage = kPageLive;
+
+static constexpr int32_t kBacklightTimeoutSec = 300; // backlight auto-off after idle
+static constexpr int32_t kPageRotateSec = 7;         // auto page rotation period
+
+// Written from the Matter thread when the commissioning window opens
+static volatile int32_t s_pairingCloseAtSec = 0;
+static int32_t s_lastActivitySec = 0;
+static int32_t s_lastRotateSec = 0;
+static bool s_autoRotate = true;
+static bool s_pairingPageDrawn = false;
+
+// Transient full-screen message (fan cleaning, rotation toggle, ...)
+static char s_message[LCD2004::kColumns + 1] = "";
+static int32_t s_messageEndSec = 0;
+static bool s_messageDrawn = false;
+
+// CO2 history for the bar chart page, one sample per sensor cycle
+static float s_co2History[LCD2004::kColumns];
+static int s_co2HistoryCount = 0;
+
+// Custom character sets; only one can live in the HD44780's CGRAM at a time
+enum class LcdCharset { None, Trend, Bars, BigDigits };
+static LcdCharset s_loadedCharset = LcdCharset::None;
+
+static int32_t NowSec()
+{
+    return (int32_t)(esp_timer_get_time() / 1000000);
+}
+
+static const char* AirQualityText()
+{
+    AirQualityEnum airQuality = matterAirQualitySensor
+        ? matterAirQualitySensor->GetLastAirQuality()
+        : AirQualityEnum::kUnknown;
+    switch (airQuality) {
+    case AirQualityEnum::kGood:          return "Good";
+    case AirQualityEnum::kFair:          return "Fair";
+    case AirQualityEnum::kModerate:      return "Moderate";
+    case AirQualityEnum::kPoor:          return "Poor";
+    case AirQualityEnum::kVeryPoor:      return "Very poor";
+    case AirQualityEnum::kExtremelyPoor: return "Extremely poor";
+    default:                             return "Unknown";
+    }
+}
+
+static void EnsureCharset(LcdCharset charset)
+{
+    if (s_loadedCharset == charset) {
+        return;
+    }
+
+    switch (charset) {
+    case LcdCharset::Trend: {
+        // Slots 0/1: up/down arrows, printed as \x08/\x09 (CGRAM mirror, avoids NUL)
+        static const uint8_t up[8]   = {0x04, 0x0E, 0x1F, 0x04, 0x04, 0x04, 0x00, 0x00};
+        static const uint8_t down[8] = {0x00, 0x00, 0x04, 0x04, 0x04, 0x1F, 0x0E, 0x04};
+        lcd->DefineChar(0, up);
+        lcd->DefineChar(1, down);
+        break;
+    }
+    case LcdCharset::Bars: {
+        // Slot n: bar filled from the bottom over n+1 pixel rows
+        for (uint8_t slot = 0; slot < 8; slot++) {
+            uint8_t pattern[8];
+            for (int row = 0; row < 8; row++) {
+                pattern[row] = (row >= 7 - slot) ? 0x1F : 0x00;
+            }
+            lcd->DefineChar(slot, pattern);
+        }
+        break;
+    }
+    case LcdCharset::BigDigits: {
+        static const uint8_t upperHalf[8] = {0x1F, 0x1F, 0x1F, 0x1F, 0x00, 0x00, 0x00, 0x00};
+        static const uint8_t lowerHalf[8] = {0x00, 0x00, 0x00, 0x00, 0x1F, 0x1F, 0x1F, 0x1F};
+        static const uint8_t twoBars[8]   = {0x1F, 0x1F, 0x1F, 0x00, 0x00, 0x1F, 0x1F, 0x1F};
+        lcd->DefineChar(0, upperHalf);
+        lcd->DefineChar(1, lowerHalf);
+        lcd->DefineChar(2, twoBars);
+        break;
+    }
+    default:
+        break;
+    }
+    s_loadedCharset = charset;
+}
+
+static void TrackMinMax(float value, float& minValue, float& maxValue)
+{
+    if (std::isnan(value)) {
+        return;
+    }
+    if (std::isnan(minValue) || value < minValue) {
+        minValue = value;
+    }
+    if (std::isnan(maxValue) || value > maxValue) {
+        maxValue = value;
+    }
+}
+
+static char TrendChar(float current, float previous, float deadband)
+{
+    if (std::isnan(current) || std::isnan(previous)) {
+        return ' ';
+    }
+    if (current - previous > deadband) {
+        return '\x08';
+    }
+    if (previous - current > deadband) {
+        return '\x09';
+    }
+    return ' ';
+}
+
+// 3x2-cell digits built from full/upper-half/lower-half/two-bar blocks
+static void BigDigitCells(int digit, char* top, char* bottom)
+{
+    static const char* const kTop[10]    = {"FUF", " F ", "UUF", "UUF", "F F", "FUU", "FUU", "UUF", "FTF", "FTF"};
+    static const char* const kBottom[10] = {"FLF", " F ", "FLL", "LLF", "UUF", "LLF", "FLF", "  F", "FLF", "LLF"};
+
+    for (int i = 0; i < 3; i++) {
+        const char cells[2] = {kTop[digit][i], kBottom[digit][i]};
+        char* out[2] = {&top[i], &bottom[i]};
+        for (int j = 0; j < 2; j++) {
+            switch (cells[j]) {
+            case 'F': *out[j] = '\xFF'; break; // ROM full block
+            case 'U': *out[j] = '\x08'; break;
+            case 'L': *out[j] = '\x09'; break;
+            case 'T': *out[j] = '\x0A'; break;
+            default:  *out[j] = ' ';    break;
+            }
+        }
+    }
+}
+
+static bool RenderWaitingIfNoData()
+{
+    if (s_readings.valid) {
+        return false;
+    }
+    lcd->Clear();
+    lcd->WriteLine(1, "  Waiting for data");
+    return true;
+}
+
+static void RenderDisplay()
+{
+    if (lcd == nullptr || !lcd->IsBacklightOn()) {
+        return;
+    }
+
+    // Larger than one row on purpose: WriteLine() truncates to 20 columns
+    char line[48];
+    int32_t now = NowSec();
+
+    if (now < s_messageEndSec) {
+        if (!s_messageDrawn) {
+            lcd->Clear();
+            lcd->WriteLine(1, s_message);
+            s_messageDrawn = true;
+        }
+        return;
+    }
+    s_messageDrawn = false;
+
+    if (now < s_pairingCloseAtSec) {
+        if (!s_pairingPageDrawn) {
+            lcd->WriteLine(0, "Matter pairing open");
+            lcd->WriteLine(1, "");
+            lcd->WriteLine(2, "Code: 3497-011-2332");
+            s_pairingPageDrawn = true;
+        }
+        snprintf(line, sizeof(line), "Closes in %ds", (int)(s_pairingCloseAtSec - now));
+        lcd->WriteLine(3, line);
+        return;
+    }
+    s_pairingPageDrawn = false;
+
+    switch (s_displayPage) {
+    case kPageLive: // \xDF is the degree symbol in the HD44780 charset
+        if (RenderWaitingIfNoData()) {
+            break;
+        }
+        EnsureCharset(LcdCharset::Trend);
+        snprintf(line, sizeof(line), "%.1f\xDF" "C%c %.1f%%RH%c",
+                 s_readings.temperature, TrendChar(s_readings.temperature, s_prevReadings.temperature, 0.2f),
+                 s_readings.humidity, TrendChar(s_readings.humidity, s_prevReadings.humidity, 1.0f));
+        lcd->WriteLine(0, line);
+        snprintf(line, sizeof(line), "CO2 %.0fppm%c VOC %.0f",
+                 s_readings.co2, TrendChar(s_readings.co2, s_prevReadings.co2, 25.0f), s_readings.voc);
+        lcd->WriteLine(1, line);
+        snprintf(line, sizeof(line), "PM2.5 %.1f%c PM10 %.1f",
+                 s_readings.pm25, TrendChar(s_readings.pm25, s_prevReadings.pm25, 0.3f), s_readings.pm10);
+        lcd->WriteLine(2, line);
+        snprintf(line, sizeof(line), "Air: %s", AirQualityText());
+        lcd->WriteLine(3, line);
+        break;
+
+    case kPageParticles:
+        if (RenderWaitingIfNoData()) {
+            break;
+        }
+        lcd->WriteLine(0, "Particles \xE4g/m3"); // \xE4 = micro sign
+        snprintf(line, sizeof(line), "PM1  %.1f  PM2.5 %.1f", s_readings.pm1, s_readings.pm25);
+        lcd->WriteLine(1, line);
+        snprintf(line, sizeof(line), "PM4  %.1f  PM10  %.1f", s_readings.pm4, s_readings.pm10);
+        lcd->WriteLine(2, line);
+        snprintf(line, sizeof(line), "NOx index %.0f", s_readings.nox);
+        lcd->WriteLine(3, line);
+        break;
+
+    case kPageMinMax:
+        if (RenderWaitingIfNoData()) {
+            break;
+        }
+        lcd->WriteLine(0, "        MIN     MAX");
+        snprintf(line, sizeof(line), "T\xDF" "C %8.1f %7.1f", s_minReadings.temperature, s_maxReadings.temperature);
+        lcd->WriteLine(1, line);
+        snprintf(line, sizeof(line), "RH%% %8.1f %7.1f", s_minReadings.humidity, s_maxReadings.humidity);
+        lcd->WriteLine(2, line);
+        snprintf(line, sizeof(line), "CO2 %8.0f %7.0f", s_minReadings.co2, s_maxReadings.co2);
+        lcd->WriteLine(3, line);
+        break;
+
+    case kPageCo2Chart: {
+        if (RenderWaitingIfNoData() || s_co2HistoryCount == 0) {
+            break;
+        }
+        EnsureCharset(LcdCharset::Bars);
+
+        float lo = s_co2History[0];
+        float hi = s_co2History[0];
+        for (int i = 1; i < s_co2HistoryCount; i++) {
+            if (s_co2History[i] < lo) lo = s_co2History[i];
+            if (s_co2History[i] > hi) hi = s_co2History[i];
+        }
+        if (hi - lo < 100.0f) { // keep a sane scale on flat data
+            float mid = (hi + lo) / 2.0f;
+            lo = mid - 50.0f;
+            hi = mid + 50.0f;
+        }
+
+        char top[LCD2004::kColumns + 1];
+        char bottom[LCD2004::kColumns + 1];
+        for (int col = 0; col < LCD2004::kColumns; col++) {
+            int idx = col - (LCD2004::kColumns - s_co2HistoryCount); // right-aligned
+            if (idx < 0) {
+                top[col] = ' ';
+                bottom[col] = ' ';
+                continue;
+            }
+            int level = (int)lroundf((s_co2History[idx] - lo) / (hi - lo) * 16.0f);
+            if (level < 1) level = 1;
+            if (level > 16) level = 16;
+            int lowerFill = level > 8 ? 8 : level;
+            int upperFill = level > 8 ? level - 8 : 0;
+            bottom[col] = (char)(0x08 + lowerFill - 1);
+            top[col] = upperFill == 0 ? ' ' : (char)(0x08 + upperFill - 1);
+        }
+        top[LCD2004::kColumns] = '\0';
+        bottom[LCD2004::kColumns] = '\0';
+
+        snprintf(line, sizeof(line), "CO2 %d-%dppm", (int)lo, (int)hi);
+        lcd->WriteLine(0, line);
+        lcd->WriteLine(1, top);
+        lcd->WriteLine(2, bottom);
+        snprintf(line, sizeof(line), "last 20min  now %.0f", s_readings.co2);
+        lcd->WriteLine(3, line);
+        break;
+    }
+
+    case kPageCo2Big: {
+        if (RenderWaitingIfNoData()) {
+            break;
+        }
+        EnsureCharset(LcdCharset::BigDigits);
+
+        int co2 = (int)lroundf(s_readings.co2);
+        if (co2 < 0) co2 = 0;
+        char digits[12];
+        snprintf(digits, sizeof(digits), "%d", co2);
+
+        char top[LCD2004::kColumns + 1];
+        char bottom[LCD2004::kColumns + 1];
+        memset(top, ' ', LCD2004::kColumns);
+        memset(bottom, ' ', LCD2004::kColumns);
+        top[LCD2004::kColumns] = '\0';
+        bottom[LCD2004::kColumns] = '\0';
+
+        int col = 1;
+        for (const char* d = digits; *d != '\0' && col + 3 <= LCD2004::kColumns; d++) {
+            BigDigitCells(*d - '0', &top[col], &bottom[col]);
+            col += 4; // 3 cells + 1 gap
+        }
+
+        lcd->WriteLine(0, "CO2");
+        lcd->WriteLine(1, top);
+        lcd->WriteLine(2, bottom);
+        snprintf(line, sizeof(line), "ppm   Air: %s", AirQualityText());
+        lcd->WriteLine(3, line);
+        break;
+    }
+
+    case kPageSystem: {
+        int64_t uptimeSeconds = esp_timer_get_time() / 1000000;
+        int days = uptimeSeconds / 86400;
+        int hours = (uptimeSeconds % 86400) / 3600;
+        int minutes = (uptimeSeconds % 3600) / 60;
+
+        lcd->WriteLine(0, s_autoRotate ? "System status" : "System status     *");
+        snprintf(line, sizeof(line), "Up %dd %02d:%02d", days, hours, minutes);
+        lcd->WriteLine(1, line);
+        snprintf(line, sizeof(line), "Heap %uk min %uk",
+                 (unsigned)(esp_get_free_heap_size() / 1024), (unsigned)(esp_get_minimum_free_heap_size() / 1024));
+        lcd->WriteLine(2, line);
+        snprintf(line, sizeof(line), "FW %s", esp_app_get_description()->version);
+        lcd->WriteLine(3, line);
+        break;
+    }
+
+    default:
+        break;
+    }
+}
+
+static void ShowMessage(const char* text, int32_t seconds)
+{
+    snprintf(s_message, sizeof(s_message), "%s", text);
+    s_messageEndSec = NowSec() + seconds;
+    s_messageDrawn = false;
+    RenderDisplay();
+}
+
+static void UpdateDisplay()
+{
+    std::vector<Sensor::Measurement> measurements = airQualitySensor->ReadAllMeasurements();
+    if (measurements.empty()) {
+        return;
+    }
+
+    DisplayReadings readings;
+    for (const auto& measurement : measurements) {
+        switch (measurement.type) {
+        case Sensor::MeasurementType::Temperature:      readings.temperature = measurement.value; break;
+        case Sensor::MeasurementType::RelativeHumidity: readings.humidity = measurement.value; break;
+        case Sensor::MeasurementType::CO2:              readings.co2 = measurement.value; break;
+        case Sensor::MeasurementType::VOC:              readings.voc = measurement.value; break;
+        case Sensor::MeasurementType::NOx:              readings.nox = measurement.value; break;
+        case Sensor::MeasurementType::PM1p0:            readings.pm1 = measurement.value; break;
+        case Sensor::MeasurementType::PM2p5:            readings.pm25 = measurement.value; break;
+        case Sensor::MeasurementType::PM4p0:            readings.pm4 = measurement.value; break;
+        case Sensor::MeasurementType::PM10p0:           readings.pm10 = measurement.value; break;
+        default: break;
+        }
+    }
+    readings.valid = true;
+    s_prevReadings = s_readings;
+    s_readings = readings;
+
+    if (!std::isnan(readings.co2)) {
+        if (s_co2HistoryCount == LCD2004::kColumns) {
+            memmove(&s_co2History[0], &s_co2History[1], sizeof(float) * (LCD2004::kColumns - 1));
+            s_co2HistoryCount--;
+        }
+        s_co2History[s_co2HistoryCount++] = readings.co2;
+    }
+
+    TrackMinMax(readings.temperature, s_minReadings.temperature, s_maxReadings.temperature);
+    TrackMinMax(readings.humidity, s_minReadings.humidity, s_maxReadings.humidity);
+    TrackMinMax(readings.co2, s_minReadings.co2, s_maxReadings.co2);
+    TrackMinMax(readings.pm25, s_minReadings.pm25, s_maxReadings.pm25);
+
+    RenderDisplay();
+}
+
 // Timer callback to measure air quality
 void UpdateSensorsTimerCallback(void *arg)
 {
     matterAirQualitySensor->UpdateMeasurements();
     matterTemperatureSensor->UpdateMeasurements();
     matterHumiditySensor->UpdateMeasurements();
+
+    if (lcd) {
+        UpdateDisplay();
+    }
+}
+
+/*
+ * UI buttons. The iot_button callbacks run in the esp_timer task -- the same
+ * task that runs UpdateSensorsTimerCallback -- so LCD and sensor access needs
+ * no extra locking. Matter interactions are scheduled onto the Matter thread.
+ */
+
+static constexpr int kDisplayButtonGpio = 23; // button 1
+static constexpr int kControlButtonGpio = 22; // button 2
+
+// Returns true when the press only woke the display; the action is swallowed
+static bool WakeDisplayOnly()
+{
+    s_lastActivitySec = NowSec();
+    if (lcd && !lcd->IsBacklightOn()) {
+        lcd->SetBacklight(true);
+        RenderDisplay();               // redraw fresh content while still blanked
+        lcd->SetDisplayVisible(true);  // then reveal it
+        return true;
+    }
+    return false;
+}
+
+static void OnDisplayPageButton(void *arg, void *data)
+{
+    if (WakeDisplayOnly()) {
+        return;
+    }
+    int32_t now = NowSec();
+    s_messageEndSec = 0; // dismiss any transient message
+
+    if (now < s_pairingCloseAtSec) {
+        // Dismiss the pairing overlay (the commissioning window stays open)
+        s_pairingCloseAtSec = 0;
+        RenderDisplay();
+        return;
+    }
+
+    // Manual navigation takes over from the auto rotation
+    if (s_autoRotate) {
+        s_autoRotate = false;
+        ESP_LOGI(TAG, "Auto-rotate paused");
+    }
+
+    s_displayPage = (s_displayPage + 1) % kDisplayPageCount;
+    ESP_LOGI(TAG, "Display page %d", s_displayPage);
+    RenderDisplay();
+}
+
+static void OnRotateToggleButton(void *arg, void *data)
+{
+    if (WakeDisplayOnly()) {
+        return;
+    }
+    s_autoRotate = !s_autoRotate;
+    s_lastRotateSec = NowSec();
+    ESP_LOGI(TAG, "Auto-rotate %s", s_autoRotate ? "on" : "off");
+    ShowMessage(s_autoRotate ? "  Auto-rotate ON" : "  Auto-rotate OFF", 2);
+}
+
+static void OnForceRefreshButton(void *arg, void *data)
+{
+    if (WakeDisplayOnly()) {
+        return;
+    }
+    ESP_LOGI(TAG, "Manual sensor refresh");
+    UpdateSensorsTimerCallback(nullptr);
+}
+
+static void OnLightToggleButton(void *arg, void *data)
+{
+    if (WakeDisplayOnly()) {
+        return;
+    }
+    chip::DeviceLayer::SystemLayer().ScheduleLambda([]() {
+        if (matterExtendedColorLight) {
+            bool on = matterExtendedColorLight->GetOnOff();
+            matterExtendedColorLight->SetLightOnOff(!on);
+        }
+    });
+}
+
+static void OnCommissioningWindowButton(void *arg, void *data)
+{
+    if (WakeDisplayOnly()) {
+        return;
+    }
+    chip::DeviceLayer::SystemLayer().ScheduleLambda([]() {
+        chip::CommissioningWindowManager& commissionMgr = chip::Server::GetInstance().GetCommissioningWindowManager();
+        if (commissionMgr.IsCommissioningWindowOpen()) {
+            ESP_LOGI(TAG, "Commissioning window already open");
+            return;
+        }
+        CHIP_ERROR err = commissionMgr.OpenBasicCommissioningWindow(chip::System::Clock::Seconds16(300),
+                                                                    chip::CommissioningWindowAdvertisement::kAllSupported);
+        if (err != CHIP_NO_ERROR) {
+            ESP_LOGE(TAG, "Failed to open commissioning window: %" CHIP_ERROR_FORMAT, err.Format());
+        } else {
+            ESP_LOGI(TAG, "Commissioning window open for 300 s");
+            s_pairingCloseAtSec = NowSec() + 300; // the display ticker shows the pairing page
+        }
+    });
+}
+
+static void OnFanCleaningButton(void *arg, void *data)
+{
+    if (WakeDisplayOnly()) {
+        return;
+    }
+    if (!airQualitySensor) {
+        return;
+    }
+    int status = airQualitySensor->StartFanCleaning();
+    if (status == 0) {
+        ESP_LOGI(TAG, "SEN66 fan cleaning started (takes ~10 s)");
+        ShowMessage("   Fan cleaning...", 12);
+    } else {
+        ESP_LOGE(TAG, "Failed to start fan cleaning: %d", status);
+    }
+}
+
+static button_handle_t CreateUiButton(int gpio)
+{
+    button_config_t btn_cfg = {};
+    button_gpio_config_t gpio_cfg = {};
+    gpio_cfg.gpio_num = gpio;
+    gpio_cfg.active_level = 0;
+
+    button_handle_t handle = nullptr;
+    esp_err_t err = iot_button_new_gpio_device(&btn_cfg, &gpio_cfg, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create button on GPIO %d: %s", gpio, esp_err_to_name(err));
+        return nullptr;
+    }
+    ESP_LOGI(TAG, "UI button ready on GPIO %d", gpio);
+    return handle;
+}
+
+static void RegisterUiButtons()
+{
+    button_handle_t displayButton = CreateUiButton(kDisplayButtonGpio);
+    if (displayButton) {
+        iot_button_register_cb(displayButton, BUTTON_SINGLE_CLICK, nullptr, OnDisplayPageButton, nullptr);
+        iot_button_register_cb(displayButton, BUTTON_DOUBLE_CLICK, nullptr, OnForceRefreshButton, nullptr);
+        iot_button_register_cb(displayButton, BUTTON_LONG_PRESS_START, nullptr, OnRotateToggleButton, nullptr);
+    }
+
+    button_handle_t controlButton = CreateUiButton(kControlButtonGpio);
+    if (controlButton) {
+        iot_button_register_cb(controlButton, BUTTON_SINGLE_CLICK, nullptr, OnLightToggleButton, nullptr);
+        iot_button_register_cb(controlButton, BUTTON_DOUBLE_CLICK, nullptr, OnFanCleaningButton, nullptr);
+        iot_button_register_cb(controlButton, BUTTON_LONG_PRESS_START, nullptr, OnCommissioningWindowButton, nullptr);
+    }
+}
+
+/*
+ * 1 s display ticker: backlight timeout, auto page rotation and refreshing
+ * the pairing/message overlay pages.
+ */
+static void DisplayTickCallback(void *arg)
+{
+    if (lcd == nullptr) {
+        return;
+    }
+
+    int32_t now = NowSec();
+    bool overlayActive = now < s_messageEndSec || now < s_pairingCloseAtSec;
+    static bool s_overlayWasActive = false;
+
+    if (lcd->IsBacklightOn() && !overlayActive && now - s_lastActivitySec >= kBacklightTimeoutSec) {
+        lcd->SetBacklight(false);
+        lcd->SetDisplayVisible(false); // blank the (reflective) panel too
+    }
+
+    if (!lcd->IsBacklightOn()) {
+        return;
+    }
+
+    if (overlayActive) {
+        RenderDisplay(); // keeps the pairing countdown fresh
+        s_overlayWasActive = true;
+        return;
+    }
+
+    if (s_overlayWasActive) {
+        // Overlay just expired; put the normal page back
+        s_overlayWasActive = false;
+        RenderDisplay();
+        return;
+    }
+
+    if (s_autoRotate && now - s_lastRotateSec >= kPageRotateSec) {
+        s_lastRotateSec = now;
+        s_displayPage = (s_displayPage + 1) % kDisplayPageCount;
+        RenderDisplay();
+    }
+}
+
+static void StartDisplayTimer()
+{
+    if (lcd == nullptr) {
+        return;
+    }
+
+    s_lastActivitySec = NowSec();
+
+    esp_timer_create_args_t timer_args = {
+        .callback = &DisplayTickCallback,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "display_tick",
+        .skip_unhandled_events = true,
+    };
+
+    esp_timer_handle_t handle = nullptr;
+    if (esp_timer_create(&timer_args, &handle) == ESP_OK) {
+        esp_timer_start_periodic(handle, 1000000);
+    }
 }
 
 void StartUpdateSensorsTimer()
@@ -134,8 +762,17 @@ extern "C" void app_main()
 
     ESP_LOGI(TAG, "Light created with endpoint_id %d", light_endpoint_id);
 
-    std::shared_ptr<AirQualitySensor> airQualitySensor = std::make_shared<SensirionSEN66>(25.0f);
+    airQualitySensor = std::make_shared<SensirionSEN66>(25.0f);
     airQualitySensor->Init();
+
+    /* The SEN66 HAL created the I2C master bus; the LCD shares it */
+    i2c_master_bus_handle_t i2c_bus = nullptr;
+    if (i2c_master_get_bus_handle(I2C_NUM_0, &i2c_bus) == ESP_OK) {
+        lcd = LCD2004::Create(i2c_bus);
+    }
+
+    RegisterUiButtons();
+    StartDisplayTimer();
 
     // Create Matter Air Quality Sensor Endpoint
     matterAirQualitySensor = MatterAirQualitySensor::CreateEndpoint(matterNode, airQualitySensor, matterExtendedColorLight);

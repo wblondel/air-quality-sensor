@@ -36,6 +36,8 @@ public:
 
     int ActivateAutomaticSelfCalibration() override;
 
+    int StartFanCleaning() override;
+
     // Start continuous measurement mode
     int StartContinuousMeasurement() override;
 

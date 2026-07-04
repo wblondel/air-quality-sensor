@@ -84,18 +84,20 @@ void AddSoftwareDiagnosticsCluster(node_t* node)
     endpoint_t* root_endpoint = endpoint::get(node, 0);
 
     cluster::software_diagnostics::config_t config;
-    uint32_t features = cluster::software_diagnostics::feature::watermarks::get_id();
-    cluster_t* cluster = cluster::software_diagnostics::create(root_endpoint, &config, CLUSTER_FLAG_SERVER, features);
+    cluster_t* cluster = cluster::software_diagnostics::create(root_endpoint, &config, CLUSTER_FLAG_SERVER);
+
+    // Watermarks (WTRMRK) -- also creates the CurrentHeapHighWatermark attribute
+    cluster::software_diagnostics::feature::watermarks::add(cluster);
 
     esp_matter::cluster::software_diagnostics::attribute::create_current_heap_free(cluster, 0);
     esp_matter::cluster::software_diagnostics::attribute::create_current_heap_used(cluster, 0);
-    esp_matter::cluster::software_diagnostics::attribute::create_current_heap_high_watermark(cluster, 0);
     esp_matter::cluster::software_diagnostics::attribute::create_thread_metrics(cluster, nullptr, 0, 0);
 }
 
 void UpdateAttributeValueUInt16(uint16_t endpoint_id, uint32_t cluster_id, uint32_t attribute_id, uint16_t value)
 {
-    esp_matter_attr_val_t val = esp_matter_uint16(value);
+    // Rloc16 (the only user) is registered as a nullable uint16
+    esp_matter_attr_val_t val = esp_matter_nullable_uint16(value);
     attribute::update(endpoint_id, cluster_id, attribute_id, &val);
 }
 
@@ -110,11 +112,11 @@ void AddThreadNetworkDiagnosticsCluster(node_t* node)
     cluster::thread_network_diagnostics::feature::error_counts::add(cluster);
 
     // PacketCounts (PKTCNT)
-    cluster::thread_network_diagnostics::feature::packets_counts::add(cluster);
+    cluster::thread_network_diagnostics::feature::packet_counts::add(cluster);
 
     // MLECounts (MLECNT)
     cluster::thread_network_diagnostics::feature::mle_counts::add(cluster);
-    esp_matter::cluster::thread_network_diagnostics::attribute::create_chlid_role_count(cluster, 0);
+    esp_matter::cluster::thread_network_diagnostics::attribute::create_child_role_count(cluster, 0);
     esp_matter::cluster::thread_network_diagnostics::attribute::create_leader_role_count(cluster, 0);
     esp_matter::cluster::thread_network_diagnostics::attribute::create_router_role_count(cluster, 0);
 

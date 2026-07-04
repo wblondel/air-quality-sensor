@@ -5,6 +5,9 @@
 #include <common_macros.h>
 #include <math.h>
 
+#include <app/clusters/air-quality-server/AirQualityCluster.h>
+#include <esp_matter_data_model_provider.h>
+
 using namespace esp_matter::attribute;
 using namespace chip::app::Clusters;
 
@@ -34,20 +37,13 @@ std::shared_ptr<MatterAirQualitySensor> MatterAirQualitySensor::CreateEndpoint(
     // Create Air Quality Endpoint
     esp_matter::endpoint::air_quality_sensor::config_t air_quality_config;
 
-    // Set the feature flags for the Air Quality cluster
-    air_quality_config.air_quality.feature_flags = 
-        cluster::air_quality::feature::fair::get_id() | 
-        cluster::air_quality::feature::moderate::get_id() |
-        cluster::air_quality::feature::very_poor::get_id() |
-        cluster::air_quality::feature::extremely_poor::get_id();
-
     endpoint_t* endpoint = air_quality_sensor::create(matterNode->GetNode(), &air_quality_config, ENDPOINT_FLAG_NONE, NULL);
     ABORT_APP_ON_FAILURE(endpoint != nullptr, ESP_LOGE(TAG, "Failed to create air quality sensor endpoint"));
 
     auto matterAirQulitySensor = std::shared_ptr<MatterAirQualitySensor>(new MatterAirQualitySensor(endpoint, airQualitySensor, lightEndpoint));
     matterNode->AddEndpoint(matterAirQulitySensor);
-    
-    //matterAirQulitySensor->AddAirQualityClusterFeatures();
+
+    matterAirQulitySensor->AddAirQualityClusterFeatures();
 
     // Add Concentration Measurement Clusters
     std::set<AirQualitySensor::MeasurementType> supportedMeasurements = airQualitySensor->GetSupportedMeasurements();
@@ -102,144 +98,102 @@ void MatterAirQualitySensor::AddCarbonDioxideConcentrationMeasurementCluster()
 {
     m_measurements.AddId(CarbonDioxideConcentrationMeasurement::Id, 3600, 3600);
 
+    // Enable the NumericMeasurement (MEA), AverageMeasurement (AVG) and PeakMeasurement (PEA)
+    // features; create() validates the flags and adds the features from the config
     cluster::carbon_dioxide_concentration_measurement::config_t cluster_config;
     cluster_config.measurement_medium = static_cast<uint8_t>(CarbonDioxideConcentrationMeasurement::MeasurementMediumEnum::kAir);
-    cluster_t* cluster = esp_matter::cluster::carbon_dioxide_concentration_measurement::create(m_endpoint, &cluster_config, CLUSTER_FLAG_SERVER);
-    
-    // Add the NumericMeasurement (MEA) Feature flag    
-    cluster::carbon_dioxide_concentration_measurement::feature::numeric_measurement::config_t numeric_measurement_config;
-    numeric_measurement_config.measurement_unit = static_cast<uint8_t>(CarbonDioxideConcentrationMeasurement::MeasurementUnitEnum::kPpm);
-    cluster::carbon_dioxide_concentration_measurement::feature::numeric_measurement::add(cluster, &numeric_measurement_config);
-
-    // Add the AverageMeasurement (AVG) Feature flag
-    cluster::carbon_dioxide_concentration_measurement::feature::average_measurement::config_t average_measurement_config;
-    average_measurement_config.average_measured_value_window = m_measurements.GetAverageWindowSizeSeconds(CarbonDioxideConcentrationMeasurement::Id);
-    cluster::carbon_dioxide_concentration_measurement::feature::average_measurement::add(cluster, &average_measurement_config);
-
-    // Add the PeakMeasurement (PEA) Feature flag
-    cluster::carbon_dioxide_concentration_measurement::feature::peak_measurement::config_t peak_measurement_config;
-    peak_measurement_config.peak_measured_value_window = m_measurements.GetPeakWindowSizeSeconds(CarbonDioxideConcentrationMeasurement::Id);
-    cluster::carbon_dioxide_concentration_measurement::feature::peak_measurement::add(cluster, &peak_measurement_config);
+    cluster_config.feature_flags = cluster::carbon_dioxide_concentration_measurement::feature::numeric_measurement::get_id() |
+                                   cluster::carbon_dioxide_concentration_measurement::feature::average_measurement::get_id() |
+                                   cluster::carbon_dioxide_concentration_measurement::feature::peak_measurement::get_id();
+    cluster_config.features.numeric_measurement.measurement_unit = static_cast<uint8_t>(CarbonDioxideConcentrationMeasurement::MeasurementUnitEnum::kPpm);
+    cluster_config.features.average_measurement.average_measured_value_window = m_measurements.GetAverageWindowSizeSeconds(CarbonDioxideConcentrationMeasurement::Id);
+    cluster_config.features.peak_measurement.peak_measured_value_window = m_measurements.GetPeakWindowSizeSeconds(CarbonDioxideConcentrationMeasurement::Id);
+    esp_matter::cluster::carbon_dioxide_concentration_measurement::create(m_endpoint, &cluster_config, CLUSTER_FLAG_SERVER);
 }
 
 void MatterAirQualitySensor::AddPm1ConcentrationMeasurementCluster()
 {
     m_measurements.AddId(Pm1ConcentrationMeasurement::Id, 3600, 3600);
 
+    // Enable the NumericMeasurement (MEA), AverageMeasurement (AVG) and PeakMeasurement (PEA)
+    // features; create() validates the flags and adds the features from the config
     esp_matter::cluster::pm1_concentration_measurement::config_t cluster_config;
     cluster_config.measurement_medium = static_cast<uint8_t>(Pm1ConcentrationMeasurement::MeasurementMediumEnum::kAir);
-    cluster_t* cluster = esp_matter::cluster::pm1_concentration_measurement::create(m_endpoint, &cluster_config, CLUSTER_FLAG_SERVER);
-
-    // Add the NumericMeasurement (MEA) Feature flag    
-    cluster::pm1_concentration_measurement::feature::numeric_measurement::config_t numeric_measurement_config;
-    numeric_measurement_config.measurement_unit = static_cast<uint8_t>(Pm1ConcentrationMeasurement::MeasurementUnitEnum::kUgm3);
-    cluster::pm1_concentration_measurement::feature::numeric_measurement::add(cluster, &numeric_measurement_config);
-
-    // Add the AverageMeasurement (AVG) Feature flag
-    cluster::pm1_concentration_measurement::feature::average_measurement::config_t average_measurement_config;
-    average_measurement_config.average_measured_value_window = m_measurements.GetAverageWindowSizeSeconds(Pm1ConcentrationMeasurement::Id);
-    cluster::pm1_concentration_measurement::feature::average_measurement::add(cluster, &average_measurement_config);
-
-    // Add the PeakMeasurement (PEA) Feature flag
-    cluster::pm1_concentration_measurement::feature::peak_measurement::config_t peak_measurement_config;
-    peak_measurement_config.peak_measured_value_window = m_measurements.GetPeakWindowSizeSeconds(Pm1ConcentrationMeasurement::Id);
-    cluster::pm1_concentration_measurement::feature::peak_measurement::add(cluster, &peak_measurement_config);
+    cluster_config.feature_flags = cluster::pm1_concentration_measurement::feature::numeric_measurement::get_id() |
+                                   cluster::pm1_concentration_measurement::feature::average_measurement::get_id() |
+                                   cluster::pm1_concentration_measurement::feature::peak_measurement::get_id();
+    cluster_config.features.numeric_measurement.measurement_unit = static_cast<uint8_t>(Pm1ConcentrationMeasurement::MeasurementUnitEnum::kUgm3);
+    cluster_config.features.average_measurement.average_measured_value_window = m_measurements.GetAverageWindowSizeSeconds(Pm1ConcentrationMeasurement::Id);
+    cluster_config.features.peak_measurement.peak_measured_value_window = m_measurements.GetPeakWindowSizeSeconds(Pm1ConcentrationMeasurement::Id);
+    esp_matter::cluster::pm1_concentration_measurement::create(m_endpoint, &cluster_config, CLUSTER_FLAG_SERVER);
 }
 
 void MatterAirQualitySensor::AddPm25ConcentrationMeasurementCluster()
 {
     m_measurements.AddId(Pm25ConcentrationMeasurement::Id, 3600, 3600);
 
+    // Enable the NumericMeasurement (MEA), AverageMeasurement (AVG) and PeakMeasurement (PEA)
+    // features; create() validates the flags and adds the features from the config
     esp_matter::cluster::pm25_concentration_measurement::config_t cluster_config;
     cluster_config.measurement_medium = static_cast<uint8_t>(Pm25ConcentrationMeasurement::MeasurementMediumEnum::kAir);
-    cluster_t* cluster = esp_matter::cluster::pm25_concentration_measurement::create(m_endpoint, &cluster_config, CLUSTER_FLAG_SERVER);
-
-    // Add the NumericMeasurement (MEA) Feature flag
-    cluster::pm25_concentration_measurement::feature::numeric_measurement::config_t numeric_measurement_config;
-    numeric_measurement_config.measurement_unit = static_cast<uint8_t>(Pm25ConcentrationMeasurement::MeasurementUnitEnum::kUgm3);
-    cluster::pm25_concentration_measurement::feature::numeric_measurement::add(cluster, &numeric_measurement_config);
-
-    // Add the AverageMeasurement (AVG) Feature flag
-    cluster::pm25_concentration_measurement::feature::average_measurement::config_t average_measurement_config;
-    average_measurement_config.average_measured_value_window = m_measurements.GetAverageWindowSizeSeconds(Pm25ConcentrationMeasurement::Id);
-    cluster::pm25_concentration_measurement::feature::average_measurement::add(cluster, &average_measurement_config);   
-
-    // Add the PeakMeasurement (PEA) Feature flag
-    cluster::pm25_concentration_measurement::feature::peak_measurement::config_t peak_measurement_config;
-    peak_measurement_config.peak_measured_value_window = m_measurements.GetPeakWindowSizeSeconds(Pm25ConcentrationMeasurement::Id);
-    cluster::pm25_concentration_measurement::feature::peak_measurement::add(cluster, &peak_measurement_config);
+    cluster_config.feature_flags = cluster::pm25_concentration_measurement::feature::numeric_measurement::get_id() |
+                                   cluster::pm25_concentration_measurement::feature::average_measurement::get_id() |
+                                   cluster::pm25_concentration_measurement::feature::peak_measurement::get_id();
+    cluster_config.features.numeric_measurement.measurement_unit = static_cast<uint8_t>(Pm25ConcentrationMeasurement::MeasurementUnitEnum::kUgm3);
+    cluster_config.features.average_measurement.average_measured_value_window = m_measurements.GetAverageWindowSizeSeconds(Pm25ConcentrationMeasurement::Id);
+    cluster_config.features.peak_measurement.peak_measured_value_window = m_measurements.GetPeakWindowSizeSeconds(Pm25ConcentrationMeasurement::Id);
+    esp_matter::cluster::pm25_concentration_measurement::create(m_endpoint, &cluster_config, CLUSTER_FLAG_SERVER);
 }
 
 void MatterAirQualitySensor::AddPm10ConcentrationMeasurementCluster()
 {
     m_measurements.AddId(Pm10ConcentrationMeasurement::Id, 3600, 3600);
 
+    // Enable the NumericMeasurement (MEA), AverageMeasurement (AVG) and PeakMeasurement (PEA)
+    // features; create() validates the flags and adds the features from the config
     esp_matter::cluster::pm10_concentration_measurement::config_t cluster_config;
     cluster_config.measurement_medium = static_cast<uint8_t>(Pm10ConcentrationMeasurement::MeasurementMediumEnum::kAir);
-    cluster_t* cluster = esp_matter::cluster::pm10_concentration_measurement::create(m_endpoint, &cluster_config, CLUSTER_FLAG_SERVER);
-
-    // Add the NumericMeasurement (MEA) Feature flag
-    cluster::pm10_concentration_measurement::feature::numeric_measurement::config_t numeric_measurement_config;
-    numeric_measurement_config.measurement_unit = static_cast<uint8_t>(Pm10ConcentrationMeasurement::MeasurementUnitEnum::kUgm3);
-    cluster::pm10_concentration_measurement::feature::numeric_measurement::add(cluster, &numeric_measurement_config);
-
-    // Add the AverageMeasurement (AVG) Feature flag
-    cluster::pm10_concentration_measurement::feature::average_measurement::config_t average_measurement_config;
-    average_measurement_config.average_measured_value_window = m_measurements.GetAverageWindowSizeSeconds(Pm10ConcentrationMeasurement::Id);
-    cluster::pm10_concentration_measurement::feature::average_measurement::add(cluster, &average_measurement_config);
-
-    // Add the PeakMeasurement (PEA) Feature flag
-    cluster::pm10_concentration_measurement::feature::peak_measurement::config_t peak_measurement_config;
-    peak_measurement_config.peak_measured_value_window = m_measurements.GetPeakWindowSizeSeconds(Pm10ConcentrationMeasurement::Id);
-    cluster::pm10_concentration_measurement::feature::peak_measurement::add(cluster, &peak_measurement_config);   
+    cluster_config.feature_flags = cluster::pm10_concentration_measurement::feature::numeric_measurement::get_id() |
+                                   cluster::pm10_concentration_measurement::feature::average_measurement::get_id() |
+                                   cluster::pm10_concentration_measurement::feature::peak_measurement::get_id();
+    cluster_config.features.numeric_measurement.measurement_unit = static_cast<uint8_t>(Pm10ConcentrationMeasurement::MeasurementUnitEnum::kUgm3);
+    cluster_config.features.average_measurement.average_measured_value_window = m_measurements.GetAverageWindowSizeSeconds(Pm10ConcentrationMeasurement::Id);
+    cluster_config.features.peak_measurement.peak_measured_value_window = m_measurements.GetPeakWindowSizeSeconds(Pm10ConcentrationMeasurement::Id);
+    esp_matter::cluster::pm10_concentration_measurement::create(m_endpoint, &cluster_config, CLUSTER_FLAG_SERVER);
 }
 
 void MatterAirQualitySensor::AddNitrogenDioxideConcentrationMeasurementCluster()
 {
     m_measurements.AddId(NitrogenDioxideConcentrationMeasurement::Id, 3600.0, 3600);
 
+    // Enable the NumericMeasurement (MEA), AverageMeasurement (AVG) and PeakMeasurement (PEA)
+    // features; create() validates the flags and adds the features from the config
     esp_matter::cluster::nitrogen_dioxide_concentration_measurement::config_t cluster_config;
     cluster_config.measurement_medium = static_cast<uint8_t>(NitrogenDioxideConcentrationMeasurement::MeasurementMediumEnum::kAir);
-    cluster_t* cluster = esp_matter::cluster::nitrogen_dioxide_concentration_measurement::create(m_endpoint, &cluster_config, CLUSTER_FLAG_SERVER);
-
-    // Add the NumericMeasurement (MEA) Feature flag
-    cluster::nitrogen_dioxide_concentration_measurement::feature::numeric_measurement::config_t numeric_measurement_config;
-    numeric_measurement_config.measurement_unit = static_cast<uint8_t>(NitrogenDioxideConcentrationMeasurement::MeasurementUnitEnum::kPpm);
-    cluster::nitrogen_dioxide_concentration_measurement::feature::numeric_measurement::add(cluster, &numeric_measurement_config);
-
-    // Add the AverageMeasurement (AVG) Feature flag
-    cluster::nitrogen_dioxide_concentration_measurement::feature::average_measurement::config_t average_measurement_config;
-    average_measurement_config.average_measured_value_window = m_measurements.GetAverageWindowSizeSeconds(NitrogenDioxideConcentrationMeasurement::Id);
-    cluster::nitrogen_dioxide_concentration_measurement::feature::average_measurement::add(cluster, &average_measurement_config);
-
-    // Add the PeakMeasurement (PEA) Feature flag
-    cluster::nitrogen_dioxide_concentration_measurement::feature::peak_measurement::config_t peak_measurement_config;
-    peak_measurement_config.peak_measured_value_window = m_measurements.GetPeakWindowSizeSeconds(NitrogenDioxideConcentrationMeasurement::Id);
-    cluster::nitrogen_dioxide_concentration_measurement::feature::peak_measurement::add(cluster, &peak_measurement_config);  
+    cluster_config.feature_flags = cluster::nitrogen_dioxide_concentration_measurement::feature::numeric_measurement::get_id() |
+                                   cluster::nitrogen_dioxide_concentration_measurement::feature::average_measurement::get_id() |
+                                   cluster::nitrogen_dioxide_concentration_measurement::feature::peak_measurement::get_id();
+    cluster_config.features.numeric_measurement.measurement_unit = static_cast<uint8_t>(NitrogenDioxideConcentrationMeasurement::MeasurementUnitEnum::kPpm);
+    cluster_config.features.average_measurement.average_measured_value_window = m_measurements.GetAverageWindowSizeSeconds(NitrogenDioxideConcentrationMeasurement::Id);
+    cluster_config.features.peak_measurement.peak_measured_value_window = m_measurements.GetPeakWindowSizeSeconds(NitrogenDioxideConcentrationMeasurement::Id);
+    esp_matter::cluster::nitrogen_dioxide_concentration_measurement::create(m_endpoint, &cluster_config, CLUSTER_FLAG_SERVER);
 }
 
 void MatterAirQualitySensor::AddTotalVolatileOrganicCompoundsConcentrationMeasurementCluster()
 {
     m_measurements.AddId(TotalVolatileOrganicCompoundsConcentrationMeasurement::Id, 3600, 3600);
 
+    // Enable the NumericMeasurement (MEA), AverageMeasurement (AVG) and PeakMeasurement (PEA)
+    // features; create() validates the flags and adds the features from the config
     esp_matter::cluster::total_volatile_organic_compounds_concentration_measurement::config_t cluster_config;
     cluster_config.measurement_medium = static_cast<uint8_t>(TotalVolatileOrganicCompoundsConcentrationMeasurement::MeasurementMediumEnum::kAir);
-    cluster_t* cluster = esp_matter::cluster::total_volatile_organic_compounds_concentration_measurement::create(m_endpoint, &cluster_config, CLUSTER_FLAG_SERVER);
-
-    // Add the NumericMeasurement (MEA) Feature flag
-    cluster::total_volatile_organic_compounds_concentration_measurement::feature::numeric_measurement::config_t numeric_measurement_config;
-    numeric_measurement_config.measurement_unit = static_cast<uint8_t>(TotalVolatileOrganicCompoundsConcentrationMeasurement::MeasurementUnitEnum::kPpm);
-    cluster::total_volatile_organic_compounds_concentration_measurement::feature::numeric_measurement::add(cluster, &numeric_measurement_config);
-
-    // Add the AverageMeasurement (AVG) Feature flag
-    cluster::total_volatile_organic_compounds_concentration_measurement::feature::average_measurement::config_t average_measurement_config;
-    average_measurement_config.average_measured_value_window = m_measurements.GetAverageWindowSizeSeconds(TotalVolatileOrganicCompoundsConcentrationMeasurement::Id);
-    cluster::total_volatile_organic_compounds_concentration_measurement::feature::average_measurement::add(cluster, &average_measurement_config);
-
-    // Add the PeakMeasurement (PEA) Feature flag
-    cluster::total_volatile_organic_compounds_concentration_measurement::feature::peak_measurement::config_t peak_measurement_config;
-    peak_measurement_config.peak_measured_value_window = m_measurements.GetPeakWindowSizeSeconds(TotalVolatileOrganicCompoundsConcentrationMeasurement::Id);
-    cluster::total_volatile_organic_compounds_concentration_measurement::feature::peak_measurement::add(cluster, &peak_measurement_config);
+    cluster_config.feature_flags = cluster::total_volatile_organic_compounds_concentration_measurement::feature::numeric_measurement::get_id() |
+                                   cluster::total_volatile_organic_compounds_concentration_measurement::feature::average_measurement::get_id() |
+                                   cluster::total_volatile_organic_compounds_concentration_measurement::feature::peak_measurement::get_id();
+    cluster_config.features.numeric_measurement.measurement_unit = static_cast<uint8_t>(TotalVolatileOrganicCompoundsConcentrationMeasurement::MeasurementUnitEnum::kPpm);
+    cluster_config.features.average_measurement.average_measured_value_window = m_measurements.GetAverageWindowSizeSeconds(TotalVolatileOrganicCompoundsConcentrationMeasurement::Id);
+    cluster_config.features.peak_measurement.peak_measured_value_window = m_measurements.GetPeakWindowSizeSeconds(TotalVolatileOrganicCompoundsConcentrationMeasurement::Id);
+    esp_matter::cluster::total_volatile_organic_compounds_concentration_measurement::create(m_endpoint, &cluster_config, CLUSTER_FLAG_SERVER);
 }
 
 void MatterAirQualitySensor::AddAirQualityClusterFeatures()
@@ -305,9 +259,11 @@ void MatterAirQualitySensor::SetLightByAirQuality(AirQualityEnum airQuality)
             return;
     }
 
-    m_lightEndpoint->SetLightOnOff(true);
-        m_lightEndpoint->SetLightColorHSV(hue, saturation);
-    m_lightEndpoint->SetLightLevelPercent(lightLevelPercent);  
+    // Update the indicator color and brightness but respect the user's on/off
+    // choice: a light that was switched off stays off, and shows the current
+    // air-quality color as soon as it is switched back on
+    m_lightEndpoint->SetLightColorHSV(hue, saturation);
+    m_lightEndpoint->SetLightLevelPercent(lightLevelPercent);
 }
 
 AirQualityEnum MatterAirQualitySensor::ClassifyAirQualityByCO2()
@@ -462,11 +418,30 @@ void MatterAirQualitySensor::UpdateAirQualityAttributes(MatterAirQualitySensor* 
 
     // Use the worst air quality from CO2, PM2.5, and PM10
     AirQualityEnum airQuality = std::max({airQualityCO2, airQualityPM25, airQualityPM10});
-    
-    matterAirQuality->UpdateAttributeValueInt16(
-        AirQuality::Id,
-        AirQuality::Attributes::AirQuality::Id,
-        static_cast<int16_t>(airQuality));
+    matterAirQuality->m_lastAirQuality = airQuality;
+
+
+    matterAirQuality->UpdateAirQuality(airQuality);
 
     matterAirQuality->SetLightByAirQuality(airQuality);
+}
+
+void MatterAirQualitySensor::UpdateAirQuality(AirQualityEnum airQuality)
+{
+    // The AirQuality attribute is managed by the CHIP server cluster instance,
+    // not by the esp-matter attribute store, so it must be set through the
+    // registered AirQualityCluster
+    auto* cluster = static_cast<chip::app::Clusters::AirQualityCluster*>(
+        esp_matter::data_model::provider::get_instance().registry().Get(
+            chip::app::ConcreteClusterPath(GetId(), AirQuality::Id)));
+    if (cluster == nullptr) {
+        ESP_LOGE(TAG, "AirQuality server cluster not registered on endpoint %u", GetId());
+        return;
+    }
+
+    chip::Protocols::InteractionModel::Status status = cluster->SetAirQuality(airQuality);
+    if (status != chip::Protocols::InteractionModel::Status::Success) {
+        ESP_LOGE(TAG, "Failed to set AirQuality attribute, status: %u",
+                 static_cast<unsigned>(chip::to_underlying(status)));
+    }
 }

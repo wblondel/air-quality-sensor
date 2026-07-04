@@ -28,6 +28,9 @@ class MatterAirQualitySensor : public MatterSensorBase
 
         void UpdateMeasurements() override;
 
+        // Last computed overall air quality (updated on the Matter thread)
+        AirQualityEnum GetLastAirQuality() const { return m_lastAirQuality; }
+
     private:
 
         MatterAirQualitySensor(node_t* node, std::shared_ptr<AirQualitySensor> airQualitySensor, std::shared_ptr<MatterExtendedColorLight> lightEndpoint);
@@ -38,6 +41,7 @@ class MatterAirQualitySensor : public MatterSensorBase
         std::shared_ptr<AirQualitySensor> m_airQualitySensor;
         std::shared_ptr<MatterExtendedColorLight> m_lightEndpoint;
         Measurements m_measurements;
+        AirQualityEnum m_lastAirQuality = AirQualityEnum::kUnknown;
 
         void AddRelativeHumidityMeasurementCluster();
 
@@ -58,6 +62,8 @@ class MatterAirQualitySensor : public MatterSensorBase
         void AddAirQualityClusterFeatures();
 
         void SetLightByAirQuality(AirQualityEnum airQuality);
+
+        void UpdateAirQuality(AirQualityEnum airQuality);
 
         AirQualityEnum ClassifyAirQualityByCO2();
 
