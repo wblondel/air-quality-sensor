@@ -14,13 +14,14 @@ humidity, shows everything locally on the display, and integrates with Home Assi
 |---|---|
 | LCD display (20×4) | Shows live readings, history, min/max and system status on 6 pages |
 | Color LED | Glows in a color matching the current overall air quality |
-| Button 1 (display button) | Page navigation, refresh, auto-rotation control |
+| Button 1 (display button) | Page navigation, refresh, settings menu |
 | Button 2 (control button) | LED on/off, fan cleaning, Matter pairing |
 | BOOT button (on the board) | Factory reset |
 | USB port | Power (and serial console for technical users) |
 
-New measurements are taken **once per minute**. Everything on the display and in
-Home Assistant updates at that rhythm.
+New measurements are taken **once per minute** by default — adjustable from 10 s
+to 5 min in the settings menu. Everything on the display and in Home Assistant
+updates at that rhythm.
 
 ---
 
@@ -49,8 +50,9 @@ The display cycles automatically through six pages (one every 7 seconds):
    plus the NOx index. (PM4 is shown *only* here — Matter has no way to report it.)
 3. **Min/Max** — the lowest and highest temperature, humidity and CO2 seen since the
    device was last powered on.
-4. **CO2 chart** — a bar chart of the last 20 minutes of CO2, one bar per minute,
-   auto-scaled; the range is shown in the header and the current value below.
+4. **CO2 chart** — a bar chart of the last 20 measurements of CO2, one bar each
+   (20 minutes at the default refresh rate), auto-scaled; the range is shown in
+   the header and the current value below.
 5. **Big CO2** — the CO2 value in large digits readable from across the room, with
    the air-quality verdict underneath.
 6. **System status** — uptime, free memory and firmware version. A `*` in the top
@@ -59,11 +61,35 @@ The display cycles automatically through six pages (one every 7 seconds):
 ### Navigating
 
 - **Press button 1** to go to the next page. Manual navigation **pauses** the
-  automatic rotation, so the display stays on the page you chose.
-- **Hold button 1 (~1.5 s)** to turn automatic rotation back on (or off again). The
-  display briefly confirms with "Auto-rotate ON/OFF".
+  automatic rotation, so the display stays on the page you chose. (Turn rotation
+  back on in the settings menu.)
+- **Hold button 1 (~1.5 s)** to open the **settings menu** (see below).
 - **Double-press button 1** to trigger a measurement immediately instead of waiting
-  for the next minute.
+  for the next cycle.
+
+### Settings menu
+
+Hold **button 1** (~1.5 s) to open the settings menu; hold it again to **save and
+leave**. The menu also saves and closes itself after 30 s without a press.
+
+| Setting | Range | What it does |
+|---|---|---|
+| Refresh | 10 s / 30 s / 1 min / 2 min / 5 min | How often a new measurement is taken |
+| Altitude | 0 – 3000 m, in 25 m steps | Your elevation, used by the CO2 sensor for pressure compensation |
+| Rotate every | 3 – 30 s | How long each display page stays on screen |
+| Auto-rotate | ON / OFF | Whether the pages rotate automatically |
+
+While the menu is open:
+
+- **Button 1** moves to the next setting (the `>` marks the current one).
+- **Button 2** increases the value. **Double-press** decreases it, and **keeping
+  it held** scrolls fast — handy for the altitude.
+- Values wrap around at the end of their range.
+
+Settings are stored permanently and survive power cuts and reboots. A factory
+reset returns them to their defaults. Setting your altitude once is worth it:
+the CO2 sensor assumes sea level unless told otherwise, so readings get more
+accurate the closer the setting is to your real elevation.
 
 ### Backlight
 
@@ -103,7 +129,9 @@ The LED color always reflects the current overall air quality:
 |---|---|---|
 | Single press | Next page (pauses rotation) | Toggle the LED light |
 | Double press | Measure now | Start sensor fan cleaning |
-| Long press (~1.5 s) | Auto-rotation on/off | Open Matter pairing window |
+| Long press (~1.5 s) | Settings menu (open / save & close) | Open Matter pairing window |
+
+Inside the settings menu the buttons change roles — see "Settings menu" above.
 
 **BOOT button** (small button on the circuit board): hold for about 5 seconds to
 **factory reset** the device. This erases all Matter pairings — the device will need
@@ -200,6 +228,9 @@ Automatic self-calibration is enabled: the sensor assumes it sees fresh outdoor-
 air (~400 ppm) at least once a week. **Air the room regularly** — if the device lives
 in a permanently closed room, CO2 readings will slowly drift.
 
+Also set your **altitude** in the settings menu (hold button 1): the sensor uses it
+for pressure compensation, which matters increasingly the higher you live.
+
 ### Placement tips
 
 - Breathing height, away from direct sunlight, radiators, and drafts.
@@ -262,11 +293,12 @@ The LCD is a 2004A (HD44780) behind a PCF8574 I2C backpack, powered at 3.3 V.
 
 | Setting | Value |
 |---|---|
-| Measurement cycle | 60 s |
-| Display page rotation | 7 s |
+| Measurement cycle | 60 s default (10 s – 5 min, settings menu) |
+| Display page rotation | 7 s default (3 – 30 s, settings menu) |
 | Backlight timeout | 5 min |
+| Settings menu timeout | 30 s (saves and closes) |
 | Trend-arrow deadbands | ±0.2 °C, ±1 %RH, ±25 ppm CO2, ±0.3 µg/m³ PM2.5 |
-| CO2 chart window | 20 samples ≈ 20 min |
+| CO2 chart window | 20 samples (= 20 min at default refresh) |
 | Fan cleaning duration | ~10 s |
 
 ### Serial console
@@ -279,7 +311,8 @@ with the esp-matter SDK).
 
 ### Factory reset details
 
-Holding BOOT ~5 s erases the Matter fabric table and NVS configuration, then reboots
+Holding BOOT ~5 s erases the Matter fabric table and NVS configuration (including
+the settings-menu values, which return to defaults), then reboots
 into pairing mode (BLE advertising, commissioning window open). Thread credentials
 are removed with the fabric — the device must be re-commissioned to rejoin the
 network. A full `idf.py erase-flash` + reflash achieves the same from a computer.

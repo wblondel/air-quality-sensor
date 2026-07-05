@@ -48,6 +48,10 @@ public:
     // Starts the fan cleaning cycle, if the sensor supports it
     virtual int StartFanCleaning() { return -1; }
 
+    // Applies a new pressure-compensation altitude (meters) at runtime and
+    // remembers it. May briefly interrupt measurement, depending on the sensor.
+    virtual int UpdateAltitude(float altitudeMeters);
+
 protected:
 
     virtual int SetAltitude(float altitude) = 0;

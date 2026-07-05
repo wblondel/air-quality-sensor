@@ -7,3 +7,10 @@ bool AirQualitySensor::Init()
 
     return true;
 }
+
+int AirQualitySensor::UpdateAltitude(float altitudeMeters)
+{
+    m_sensorAltitude = altitudeMeters;
+
+    return SetAltitude(altitudeMeters);
+}

@@ -43,6 +43,7 @@ using namespace chip::DeviceLayer;
 #include "MatterTemperatureSensor.h"
 #include "SensirionSEN66.h"
 #include "LCD2004.h"
+#include "AppSettings.h"
 
 #include <driver/i2c_master.h>
 #include <cmath>
@@ -50,8 +51,6 @@ using namespace chip::DeviceLayer;
 #include <esp_app_desc.h>
 #include <iot_button.h>
 #include <button_gpio.h>
-
-static constexpr uint32_t MEASUREMENT_SAMPLE_SECONDS = 60;
 
 std::shared_ptr<MatterNode> matterNode;
 std::shared_ptr<MatterAirQualitySensor> matterAirQualitySensor;
@@ -61,6 +60,7 @@ std::shared_ptr<MatterHumiditySensor> matterHumiditySensor;
 esp_timer_handle_t sensor_timer_handle;
 static std::shared_ptr<AirQualitySensor> airQualitySensor;
 static LCD2004* lcd = nullptr;
+static AppSettings s_settings;
 
 static const char *TAG = "app_main";
 uint16_t light_endpoint_id = 0;
@@ -110,7 +110,7 @@ static DisplayReadings s_maxReadings;
 static int s_displayPage = kPageLive;
 
 static constexpr int32_t kBacklightTimeoutSec = 300; // backlight auto-off after idle
-static constexpr int32_t kPageRotateSec = 7;         // auto page rotation period
+static constexpr int32_t kSettingsTimeoutSec = 30;   // settings page saves and closes after idle
 
 // Written from the Matter thread when the commissioning window opens
 static volatile int32_t s_pairingCloseAtSec = 0;
@@ -123,6 +123,18 @@ static bool s_pairingPageDrawn = false;
 static char s_message[LCD2004::kColumns + 1] = "";
 static int32_t s_messageEndSec = 0;
 static bool s_messageDrawn = false;
+
+// Settings editor state; s_editSettings is the working copy until saved
+enum SettingsField {
+    kFieldRefresh = 0,
+    kFieldAltitude,
+    kFieldRotatePeriod,
+    kFieldAutoRotate,
+    kSettingsFieldCount,
+};
+static bool s_settingsOpen = false;
+static int s_settingsField = 0;
+static AppSettings s_editSettings;
 
 // CO2 history for the bar chart page, one sample per sensor cycle
 static float s_co2History[LCD2004::kColumns];
@@ -252,6 +264,48 @@ static bool RenderWaitingIfNoData()
     return true;
 }
 
+static void FormatRefreshValue(char* out, size_t size, uint32_t seconds)
+{
+    if (seconds < 60) {
+        snprintf(out, size, "%us", (unsigned)seconds);
+    } else {
+        snprintf(out, size, "%umin", (unsigned)(seconds / 60));
+    }
+}
+
+static void RenderSettingsPage()
+{
+    static const char* const kLabels[kSettingsFieldCount] = {
+        "Refresh", "Altitude", "Rotate every", "Auto-rotate"
+    };
+
+    lcd->WriteLine(0, "Settings");
+
+    // 3 visible rows; scroll so the selected field stays on screen
+    int firstField = s_settingsField <= 2 ? 0 : s_settingsField - 2;
+    for (int row = 0; row < 3; row++) {
+        int field = firstField + row;
+        char value[16] = "";
+        switch (field) {
+        case kFieldRefresh:
+            FormatRefreshValue(value, sizeof(value), s_editSettings.refreshSeconds);
+            break;
+        case kFieldAltitude:
+            snprintf(value, sizeof(value), "%um", s_editSettings.altitudeMeters);
+            break;
+        case kFieldRotatePeriod:
+            snprintf(value, sizeof(value), "%us", s_editSettings.rotateSeconds);
+            break;
+        case kFieldAutoRotate:
+            snprintf(value, sizeof(value), "%s", s_editSettings.autoRotate ? "ON" : "OFF");
+            break;
+        }
+        char line[36]; // WriteLine truncates to the 20 columns
+        snprintf(line, sizeof(line), "%c%-13s%6s", field == s_settingsField ? '>' : ' ', kLabels[field], value);
+        lcd->WriteLine(row + 1, line);
+    }
+}
+
 static void RenderDisplay()
 {
     if (lcd == nullptr || !lcd->IsBacklightOn()) {
@@ -271,6 +325,11 @@ static void RenderDisplay()
         return;
     }
     s_messageDrawn = false;
+
+    if (s_settingsOpen) {
+        RenderSettingsPage();
+        return;
+    }
 
     if (now < s_pairingCloseAtSec) {
         if (!s_pairingPageDrawn) {
@@ -373,7 +432,8 @@ static void RenderDisplay()
         lcd->WriteLine(0, line);
         lcd->WriteLine(1, top);
         lcd->WriteLine(2, bottom);
-        snprintf(line, sizeof(line), "last 20min  now %.0f", s_readings.co2);
+        snprintf(line, sizeof(line), "last %umin  now %.0f",
+                 (unsigned)((LCD2004::kColumns * s_settings.refreshSeconds + 30) / 60), s_readings.co2);
         lcd->WriteLine(3, line);
         break;
     }
@@ -437,6 +497,99 @@ static void ShowMessage(const char* text, int32_t seconds)
     snprintf(s_message, sizeof(s_message), "%s", text);
     s_messageEndSec = NowSec() + seconds;
     s_messageDrawn = false;
+    RenderDisplay();
+}
+
+static void OpenSettings()
+{
+    s_editSettings = s_settings;
+    s_editSettings.autoRotate = s_autoRotate; // reflect a live pause; saving persists it
+    s_settingsField = 0;
+    s_settingsOpen = true;
+    s_messageEndSec = 0;
+    s_pairingPageDrawn = false; // force a full redraw when the menu closes
+    RenderDisplay();
+}
+
+static void ApplyAndCloseSettings()
+{
+    s_settingsOpen = false;
+    s_pairingPageDrawn = false;
+
+    bool changed = s_editSettings.refreshSeconds != s_settings.refreshSeconds ||
+                   s_editSettings.altitudeMeters != s_settings.altitudeMeters ||
+                   s_editSettings.rotateSeconds != s_settings.rotateSeconds ||
+                   s_editSettings.autoRotate != s_settings.autoRotate;
+
+    if (s_editSettings.refreshSeconds != s_settings.refreshSeconds && sensor_timer_handle) {
+        esp_timer_stop(sensor_timer_handle);
+        esp_timer_start_periodic(sensor_timer_handle, (uint64_t)s_editSettings.refreshSeconds * 1000000ULL);
+        ESP_LOGI(TAG, "Sensor refresh period set to %u s", (unsigned)s_editSettings.refreshSeconds);
+    }
+
+    if (s_editSettings.altitudeMeters != s_settings.altitudeMeters && airQualitySensor) {
+        int status = airQualitySensor->UpdateAltitude(s_editSettings.altitudeMeters);
+        if (status == 0) {
+            ESP_LOGI(TAG, "Sensor altitude set to %u m", s_editSettings.altitudeMeters);
+        } else {
+            ESP_LOGE(TAG, "Failed to set sensor altitude: %d", status);
+        }
+    }
+
+    s_autoRotate = s_editSettings.autoRotate;
+    s_lastRotateSec = NowSec();
+
+    if (changed) {
+        s_settings = s_editSettings;
+        s_settings.Save();
+        ShowMessage("   Settings saved", 2);
+    } else {
+        RenderDisplay();
+    }
+}
+
+static void StepSettingsField(int direction)
+{
+    switch (s_settingsField) {
+    case kFieldRefresh: {
+        constexpr int count = sizeof(AppSettings::kRefreshChoices) / sizeof(AppSettings::kRefreshChoices[0]);
+        int index = 0;
+        for (int i = 0; i < count; i++) {
+            if (AppSettings::kRefreshChoices[i] == s_editSettings.refreshSeconds) {
+                index = i;
+                break;
+            }
+        }
+        index = (index + direction + count) % count;
+        s_editSettings.refreshSeconds = AppSettings::kRefreshChoices[index];
+        break;
+    }
+    case kFieldAltitude: {
+        int32_t altitude = (int32_t)s_editSettings.altitudeMeters + direction * AppSettings::kAltitudeStepMeters;
+        if (altitude < 0) {
+            altitude = AppSettings::kAltitudeMaxMeters;
+        } else if (altitude > AppSettings::kAltitudeMaxMeters) {
+            altitude = 0;
+        }
+        s_editSettings.altitudeMeters = (uint16_t)altitude;
+        break;
+    }
+    case kFieldRotatePeriod: {
+        int32_t rotate = (int32_t)s_editSettings.rotateSeconds + direction;
+        if (rotate < AppSettings::kRotateMinSec) {
+            rotate = AppSettings::kRotateMaxSec;
+        } else if (rotate > AppSettings::kRotateMaxSec) {
+            rotate = AppSettings::kRotateMinSec;
+        }
+        s_editSettings.rotateSeconds = (uint8_t)rotate;
+        break;
+    }
+    case kFieldAutoRotate:
+        s_editSettings.autoRotate = !s_editSettings.autoRotate;
+        break;
+    default:
+        break;
+    }
     RenderDisplay();
 }
 
@@ -524,6 +677,12 @@ static void OnDisplayPageButton(void *arg, void *data)
     int32_t now = NowSec();
     s_messageEndSec = 0; // dismiss any transient message
 
+    if (s_settingsOpen) {
+        s_settingsField = (s_settingsField + 1) % kSettingsFieldCount;
+        RenderDisplay();
+        return;
+    }
+
     if (now < s_pairingCloseAtSec) {
         // Dismiss the pairing overlay (the commissioning window stays open)
         s_pairingCloseAtSec = 0;
@@ -542,20 +701,27 @@ static void OnDisplayPageButton(void *arg, void *data)
     RenderDisplay();
 }
 
-static void OnRotateToggleButton(void *arg, void *data)
+static void OnSettingsMenuButton(void *arg, void *data)
 {
     if (WakeDisplayOnly()) {
         return;
     }
-    s_autoRotate = !s_autoRotate;
-    s_lastRotateSec = NowSec();
-    ESP_LOGI(TAG, "Auto-rotate %s", s_autoRotate ? "on" : "off");
-    ShowMessage(s_autoRotate ? "  Auto-rotate ON" : "  Auto-rotate OFF", 2);
+    if (lcd == nullptr) {
+        return;
+    }
+    if (s_settingsOpen) {
+        ApplyAndCloseSettings();
+    } else {
+        OpenSettings();
+    }
 }
 
 static void OnForceRefreshButton(void *arg, void *data)
 {
     if (WakeDisplayOnly()) {
+        return;
+    }
+    if (s_settingsOpen) {
         return;
     }
     ESP_LOGI(TAG, "Manual sensor refresh");
@@ -565,6 +731,10 @@ static void OnForceRefreshButton(void *arg, void *data)
 static void OnLightToggleButton(void *arg, void *data)
 {
     if (WakeDisplayOnly()) {
+        return;
+    }
+    if (s_settingsOpen) {
+        StepSettingsField(1);
         return;
     }
     chip::DeviceLayer::SystemLayer().ScheduleLambda([]() {
@@ -579,6 +749,9 @@ static void OnCommissioningWindowButton(void *arg, void *data)
 {
     if (WakeDisplayOnly()) {
         return;
+    }
+    if (s_settingsOpen) {
+        return; // long-pressing button 2 in the menu is the fast value scroll
     }
     chip::DeviceLayer::SystemLayer().ScheduleLambda([]() {
         chip::CommissioningWindowManager& commissionMgr = chip::Server::GetInstance().GetCommissioningWindowManager();
@@ -602,6 +775,10 @@ static void OnFanCleaningButton(void *arg, void *data)
     if (WakeDisplayOnly()) {
         return;
     }
+    if (s_settingsOpen) {
+        StepSettingsField(-1);
+        return;
+    }
     if (!airQualitySensor) {
         return;
     }
@@ -614,9 +791,29 @@ static void OnFanCleaningButton(void *arg, void *data)
     }
 }
 
+// Serial LONG_PRESS_HOLD events on button 2, throttled to a controlled
+// fast-scroll through the selected settings value
+static void OnValueFastScroll(void *arg, void *data)
+{
+    if (!s_settingsOpen) {
+        return;
+    }
+    static int64_t s_lastStepUs = 0;
+    int64_t now = esp_timer_get_time();
+    if (now - s_lastStepUs < 150000) {
+        return;
+    }
+    s_lastStepUs = now;
+    s_lastActivitySec = NowSec(); // holding counts as activity for the menu timeout
+    StepSettingsField(1);
+}
+
 static button_handle_t CreateUiButton(int gpio)
 {
     button_config_t btn_cfg = {};
+    // Kconfig's 5 s default is for the BOOT factory-reset hold; UI gestures
+    // want something snappier
+    btn_cfg.long_press_time = 1500;
     button_gpio_config_t gpio_cfg = {};
     gpio_cfg.gpio_num = gpio;
     gpio_cfg.active_level = 0;
@@ -637,7 +834,7 @@ static void RegisterUiButtons()
     if (displayButton) {
         iot_button_register_cb(displayButton, BUTTON_SINGLE_CLICK, nullptr, OnDisplayPageButton, nullptr);
         iot_button_register_cb(displayButton, BUTTON_DOUBLE_CLICK, nullptr, OnForceRefreshButton, nullptr);
-        iot_button_register_cb(displayButton, BUTTON_LONG_PRESS_START, nullptr, OnRotateToggleButton, nullptr);
+        iot_button_register_cb(displayButton, BUTTON_LONG_PRESS_START, nullptr, OnSettingsMenuButton, nullptr);
     }
 
     button_handle_t controlButton = CreateUiButton(kControlButtonGpio);
@@ -645,6 +842,7 @@ static void RegisterUiButtons()
         iot_button_register_cb(controlButton, BUTTON_SINGLE_CLICK, nullptr, OnLightToggleButton, nullptr);
         iot_button_register_cb(controlButton, BUTTON_DOUBLE_CLICK, nullptr, OnFanCleaningButton, nullptr);
         iot_button_register_cb(controlButton, BUTTON_LONG_PRESS_START, nullptr, OnCommissioningWindowButton, nullptr);
+        iot_button_register_cb(controlButton, BUTTON_LONG_PRESS_HOLD, nullptr, OnValueFastScroll, nullptr);
     }
 }
 
@@ -659,6 +857,14 @@ static void DisplayTickCallback(void *arg)
     }
 
     int32_t now = NowSec();
+
+    if (s_settingsOpen) {
+        if (now - s_lastActivitySec >= kSettingsTimeoutSec) {
+            ApplyAndCloseSettings(); // idle timeout saves and leaves the menu
+        }
+        return;
+    }
+
     bool overlayActive = now < s_messageEndSec || now < s_pairingCloseAtSec;
     static bool s_overlayWasActive = false;
 
@@ -684,7 +890,7 @@ static void DisplayTickCallback(void *arg)
         return;
     }
 
-    if (s_autoRotate && now - s_lastRotateSec >= kPageRotateSec) {
+    if (s_autoRotate && now - s_lastRotateSec >= s_settings.rotateSeconds) {
         s_lastRotateSec = now;
         s_displayPage = (s_displayPage + 1) % kDisplayPageCount;
         RenderDisplay();
@@ -731,12 +937,11 @@ void StartUpdateSensorsTimer()
         return;
     }
     
-    // Start the timer to trigger every 60 seconds (1 minute)
-    err = esp_timer_start_periodic(sensor_timer_handle, MEASUREMENT_SAMPLE_SECONDS * 1000000ULL); // In microseconds
+    err = esp_timer_start_periodic(sensor_timer_handle, (uint64_t)s_settings.refreshSeconds * 1000000ULL);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start timer: %s", esp_err_to_name(err));
     }
-    ESP_LOGI(TAG, "Update sensors timer started.");
+    ESP_LOGI(TAG, "Update sensors timer started (every %u s).", (unsigned)s_settings.refreshSeconds);
 }
 
 extern "C" void app_main()
@@ -745,6 +950,9 @@ extern "C" void app_main()
 
     /* Initialize the ESP NVS layer */
     nvs_flash_init();
+
+    s_settings.Load();
+    s_autoRotate = s_settings.autoRotate;
 
     /* Initialize driver */
     app_driver_handle_t button_handle = app_driver_button_init();
@@ -762,7 +970,7 @@ extern "C" void app_main()
 
     ESP_LOGI(TAG, "Light created with endpoint_id %d", light_endpoint_id);
 
-    airQualitySensor = std::make_shared<SensirionSEN66>(25.0f);
+    airQualitySensor = std::make_shared<SensirionSEN66>((float)s_settings.altitudeMeters);
     airQualitySensor->Init();
 
     /* The SEN66 HAL created the I2C master bus; the LCD shares it */

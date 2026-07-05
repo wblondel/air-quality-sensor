@@ -43,6 +43,9 @@ public:
 
     int SetAmbientPressure(float ambientPressureKiloPascal) override;
 
+    // The SEN66 only accepts the altitude command in idle mode, so this stops
+    // and restarts continuous measurement around it.
+    int UpdateAltitude(float altitudeMeters) override;
 
 protected:
     // Set sensor altitude

@@ -181,3 +181,14 @@ int SensirionSEN66::StartContinuousMeasurement()
 
   return status;
 }
+
+int SensirionSEN66::UpdateAltitude(float altitudeMeters)
+{
+  m_sensorAltitude = altitudeMeters;
+
+  sen66_stop_measurement();
+  int16_t status = sen66_set_sensor_altitude(altitudeMeters);
+  int16_t startStatus = sen66_start_continuous_measurement();
+
+  return status != NO_ERROR ? status : startStatus;
+}
