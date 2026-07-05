@@ -307,7 +307,8 @@ Connect over USB at **115200 baud** (`idf.py monitor` from the project directory
 any serial terminal). The log shows boot progress, every measurement cycle, button
 events, Matter commissioning steps and Thread state changes — the first place to look
 when diagnosing anything. Firmware is flashed with `idf.py flash` (ESP-IDF v5.5.x
-with the esp-matter SDK).
+with the esp-matter SDK), and later versions can be installed over the air from
+Home Assistant — see `OTA_UPDATES.md`.
 
 ### Factory reset details
 
