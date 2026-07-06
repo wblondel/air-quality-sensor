@@ -47,6 +47,11 @@ public:
     // and restarts continuous measurement around it.
     int UpdateAltitude(float altitudeMeters) override;
 
+    // Reads the current VOC gas-index algorithm state and saves it to NVS, so
+    // the algorithm resumes instead of restarting its learning phase after a
+    // reboot. Skips the write when the state is unchanged.
+    void PersistState() override;
+
 protected:
     // Set sensor altitude
     int SetAltitude(float altitude) override;
@@ -68,6 +73,17 @@ private:
     };
 
     int16_t ReadSensorData(SensorData& data);
+
+    // Restores the VOC gas-index algorithm state from NVS (if any) into the
+    // sensor. Must be called in idle mode, before StartContinuousMeasurement.
+    void RestoreVocState();
+
+    // The SEN66 VOC algorithm state is exactly 8 bytes.
+    static constexpr size_t kVocStateSize = 8;
+
+    // Last VOC state written to / read from NVS, used to skip redundant writes.
+    bool m_hasSavedVocState = false;
+    uint8_t m_lastSavedVocState[kVocStateSize] = {0};
 
     // Resets and reconfigures the sensor after repeated read failures.
     void Recover();

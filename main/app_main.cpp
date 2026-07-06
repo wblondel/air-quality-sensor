@@ -745,6 +745,13 @@ static void UpdateDisplay()
     RenderDisplay();
 }
 
+// The VOC gas-index algorithm state is persisted to NVS at this cadence so the
+// algorithm resumes after a reboot instead of relearning from scratch. Kept
+// coarse to limit flash wear; losing at most this much learning on a sudden
+// power loss is fine.
+static constexpr int32_t kVocStateSaveIntervalSec = 1800; // 30 min
+static int32_t s_lastVocSaveSec = 0;
+
 // Timer callback to measure air quality
 void UpdateSensorsTimerCallback(void *arg)
 {
@@ -754,6 +761,11 @@ void UpdateSensorsTimerCallback(void *arg)
 
     if (lcd) {
         UpdateDisplay();
+    }
+
+    if (airQualitySensor && NowSec() - s_lastVocSaveSec >= kVocStateSaveIntervalSec) {
+        airQualitySensor->PersistState();
+        s_lastVocSaveSec = NowSec();
     }
 }
 

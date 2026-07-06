@@ -1,14 +1,19 @@
 #include "SensirionSEN66.h"
 
 #include <cmath>
+#include <cstring>
 #include <stdint.h>
 #include <esp_log.h>
+#include <nvs.h>
 #include "drivers/sensirion/sen66_i2c.h"
 #include "drivers/sensirion/sensirion_common.h"
 #include "drivers/sensirion/sensirion_i2c_hal.h"
 
 namespace {
     const char* TAG = "SensirionSEN66";
+    // NVS location of the persisted VOC gas-index algorithm state.
+    const char* kVocNvsNamespace = "sen66";
+    const char* kVocNvsKey = "voc_state";
     constexpr uint16_t INVALID_UINT16 = 0xFFFF;
     constexpr int16_t INVALID_INT16 = 0x7FFF;
     constexpr float PM_CONVERSION_FACTOR = 10.0f;
@@ -33,6 +38,7 @@ bool SensirionSEN66::Init()
   AirQualitySensor::Init();
 
   ActivateAutomaticSelfCalibration();
+  RestoreVocState();
   StartContinuousMeasurement();
 
   return true;
@@ -92,13 +98,87 @@ void SensirionSEN66::Recover() {
         return;
     }
 
-    // Sensor altitude, automatic self-calibration and measurement mode are all
-    // volatile and revert on reset, so re-apply them exactly as Init() does.
+    // Sensor altitude, automatic self-calibration, the VOC algorithm state and
+    // the measurement mode are all reset by device_reset, so re-apply them
+    // exactly as Init() does.
     sen66_set_sensor_altitude(static_cast<uint16_t>(m_sensorAltitude));
     ActivateAutomaticSelfCalibration();
+    RestoreVocState();
     StartContinuousMeasurement();
 
     ESP_LOGI(TAG, "SEN66 recovery complete");
+}
+
+// Restores the VOC gas-index algorithm state saved in NVS into the sensor so it
+// resumes instead of relearning from scratch. Must run in idle mode (the SEN66
+// applies the state at the next StartContinuousMeasurement); a missing or
+// wrong-sized blob just leaves the algorithm to start fresh.
+void SensirionSEN66::RestoreVocState() {
+    nvs_handle_t handle;
+    if (nvs_open(kVocNvsNamespace, NVS_READONLY, &handle) != ESP_OK) {
+        ESP_LOGI(TAG, "No saved VOC algorithm state; starting fresh");
+        return;
+    }
+
+    uint8_t state[kVocStateSize];
+    size_t len = sizeof(state);
+    esp_err_t err = nvs_get_blob(handle, kVocNvsKey, state, &len);
+    nvs_close(handle);
+
+    if (err != ESP_OK || len != kVocStateSize) {
+        ESP_LOGI(TAG, "No usable VOC algorithm state (err %s, len %u); starting fresh",
+                 esp_err_to_name(err), (unsigned)len);
+        return;
+    }
+
+    int16_t status = sen66_set_voc_algorithm_state(state, kVocStateSize);
+    if (status != NO_ERROR) {
+        ESP_LOGW(TAG, "Failed to apply saved VOC algorithm state (error %d)", status);
+        return;
+    }
+
+    // Remember what we applied so the next PersistState skips an identical write.
+    memcpy(m_lastSavedVocState, state, kVocStateSize);
+    m_hasSavedVocState = true;
+    ESP_LOGI(TAG, "Restored VOC algorithm state from NVS");
+}
+
+// Reads the current VOC gas-index algorithm state and persists it to NVS. Safe
+// to call while measuring. Skips the write when the state is unchanged, to
+// avoid needless flash wear.
+void SensirionSEN66::PersistState() {
+    uint8_t state[kVocStateSize];
+    int16_t status = sen66_get_voc_algorithm_state(state, kVocStateSize);
+    if (status != NO_ERROR) {
+        ESP_LOGW(TAG, "Failed to read VOC algorithm state (error %d); not persisting", status);
+        return;
+    }
+
+    if (m_hasSavedVocState && memcmp(state, m_lastSavedVocState, kVocStateSize) == 0) {
+        return; // unchanged since last save
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(kVocNvsNamespace, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS for VOC state: %s", esp_err_to_name(err));
+        return;
+    }
+
+    err = nvs_set_blob(handle, kVocNvsKey, state, kVocStateSize);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to persist VOC algorithm state: %s", esp_err_to_name(err));
+        return;
+    }
+
+    memcpy(m_lastSavedVocState, state, kVocStateSize);
+    m_hasSavedVocState = true;
+    ESP_LOGI(TAG, "Persisted VOC algorithm state to NVS");
 }
 
 std::vector<AirQualitySensor::Measurement> SensirionSEN66::ReadAllMeasurements() {
