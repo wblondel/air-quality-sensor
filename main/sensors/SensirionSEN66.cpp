@@ -2,11 +2,13 @@
 
 #include <cmath>
 #include <stdint.h>
+#include <esp_log.h>
 #include "drivers/sensirion/sen66_i2c.h"
 #include "drivers/sensirion/sensirion_common.h"
 #include "drivers/sensirion/sensirion_i2c_hal.h"
 
 namespace {
+    const char* TAG = "SensirionSEN66";
     constexpr uint16_t INVALID_UINT16 = 0xFFFF;
     constexpr int16_t INVALID_INT16 = 0x7FFF;
     constexpr float PM_CONVERSION_FACTOR = 10.0f;
@@ -52,11 +54,51 @@ std::set<AirQualitySensor::MeasurementType> SensirionSEN66::GetSupportedMeasurem
     };
 }
 
-// Private helper function to read all sensor values
+// Private helper that reads all sensor values in one transaction. Tracks
+// consecutive failures and triggers a recovery once they cross the threshold,
+// so a wedged sensor gets reset instead of silently returning no data forever.
 int16_t SensirionSEN66::ReadSensorData(SensorData& data) {
-    return sen66_read_measured_values_as_integers(
+    int16_t error = sen66_read_measured_values_as_integers(
         &data.pm1p0, &data.pm2p5, &data.pm4p0, &data.pm10p0,
         &data.humidity, &data.temperature, &data.vocIndex, &data.noxIndex, &data.co2);
+
+    if (error == NO_ERROR) {
+        m_consecutiveReadFailures = 0;
+        return error;
+    }
+
+    m_consecutiveReadFailures++;
+    ESP_LOGW(TAG, "SEN66 read failed (error %d), %d consecutive failure(s)",
+             error, m_consecutiveReadFailures);
+
+    if (m_consecutiveReadFailures >= kMaxConsecutiveReadFailures) {
+        Recover();
+        m_consecutiveReadFailures = 0;
+    }
+
+    return error;
+}
+
+// Recovers the sensor after repeated read failures: a soft reset returns it to
+// idle (the driver waits ~1.2 s internally), then the volatile configuration is
+// re-applied and continuous measurement restarted. This runs on the
+// measurement-timer task, so a rare ~1.3 s stall here is acceptable.
+void SensirionSEN66::Recover() {
+    ESP_LOGW(TAG, "SEN66 unresponsive; attempting recovery (device reset + reconfigure)");
+
+    int16_t status = sen66_device_reset();
+    if (status != NO_ERROR) {
+        ESP_LOGE(TAG, "SEN66 device reset failed (error %d); will retry next cycle", status);
+        return;
+    }
+
+    // Sensor altitude, automatic self-calibration and measurement mode are all
+    // volatile and revert on reset, so re-apply them exactly as Init() does.
+    sen66_set_sensor_altitude(static_cast<uint16_t>(m_sensorAltitude));
+    ActivateAutomaticSelfCalibration();
+    StartContinuousMeasurement();
+
+    ESP_LOGI(TAG, "SEN66 recovery complete");
 }
 
 std::vector<AirQualitySensor::Measurement> SensirionSEN66::ReadAllMeasurements() {

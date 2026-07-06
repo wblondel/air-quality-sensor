@@ -69,4 +69,12 @@ private:
 
     int16_t ReadSensorData(SensorData& data);
 
+    // Resets and reconfigures the sensor after repeated read failures.
+    void Recover();
+
+    // Consecutive ReadSensorData failures; once this reaches
+    // kMaxConsecutiveReadFailures a recovery is attempted.
+    int m_consecutiveReadFailures = 0;
+    static constexpr int kMaxConsecutiveReadFailures = 5;
+
 };

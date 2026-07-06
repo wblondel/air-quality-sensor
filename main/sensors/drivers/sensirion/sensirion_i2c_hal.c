@@ -1,7 +1,9 @@
 #include "sensirion_i2c_hal.h"
 #include "sensirion_common.h"
+#include "sensirion_i2c.h"
 #include "sensirion_config.h"
 
+#include <esp_err.h>
 #include <esp_log.h>
 #include "driver/i2c_master.h"
 #include "sdkconfig.h"
@@ -21,21 +23,39 @@ static const char * TAG = "SEN66";
 #define I2C_MASTER_NUM I2C_NUM_0    /*!< I2C port number for master dev */
 #define I2C_MASTER_FREQ_HZ 100000   /*!< I2C master clock frequency */
 
+/* A single I2C transaction is retried a few times before it is reported as an
+ * error, so a transient bus glitch no longer aborts the whole device. Each
+ * attempt uses a finite timeout (the original code waited forever, which could
+ * wedge the measurement task on a stuck bus). */
+#define I2C_HAL_MAX_ATTEMPTS 3
+#define I2C_HAL_RETRY_DELAY_US (2 * 1000)  /* 2 ms between attempts */
+#define I2C_HAL_TXN_TIMEOUT_MS 1000        /* per-attempt timeout */
+
 i2c_master_bus_handle_t bus_handle;
 i2c_master_dev_handle_t dev_handle = NULL;
 
-i2c_master_dev_handle_t sensirion_i2c_hal_add_device(uint8_t address)
+/* Lazily attach the sensor to the shared I2C bus. Non-fatal: on failure the
+ * global dev_handle stays NULL and the caller returns an I2C error instead of
+ * aborting the whole device. */
+static esp_err_t hal_ensure_device(uint8_t address)
 {
+    if (dev_handle != NULL) {
+        return ESP_OK;
+    }
+
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = address,
-        .scl_speed_hz = 100000,
+        .scl_speed_hz = I2C_MASTER_FREQ_HZ,
     };
 
-    i2c_master_dev_handle_t dev_handle;
-    ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &dev_cfg, &dev_handle));
-
-    return dev_handle;
+    esp_err_t err = i2c_master_bus_add_device(bus_handle, &dev_cfg, &dev_handle);
+    if (err != ESP_OK) {
+        dev_handle = NULL;
+        ESP_LOGE(TAG, "i2c_master_bus_add_device(0x%02x) failed: %s", address,
+                 esp_err_to_name(err));
+    }
+    return err;
 }
 
 /**
@@ -96,13 +116,27 @@ void sensirion_i2c_hal_free(void) {
  */
 int8_t sensirion_i2c_hal_read(uint8_t address, uint8_t* data, uint8_t count)
 {
-    if (dev_handle == NULL)
-        dev_handle = sensirion_i2c_hal_add_device(address);
+    if (hal_ensure_device(address) != ESP_OK) {
+        return I2C_BUS_ERROR;
+    }
 
-    esp_err_t status = i2c_master_receive(dev_handle, data, count, -1);
-    ESP_ERROR_CHECK(status);
+    esp_err_t status = ESP_FAIL;
+    for (uint8_t attempt = 1; attempt <= I2C_HAL_MAX_ATTEMPTS; attempt++) {
+        status = i2c_master_receive(dev_handle, data, count, I2C_HAL_TXN_TIMEOUT_MS);
+        if (status == ESP_OK) {
+            return NO_ERROR;
+        }
+        ESP_LOGD(TAG, "I2C read (0x%02x, %u B) attempt %u/%u failed: %s", address,
+                 (unsigned)count, (unsigned)attempt, (unsigned)I2C_HAL_MAX_ATTEMPTS,
+                 esp_err_to_name(status));
+        if (attempt < I2C_HAL_MAX_ATTEMPTS) {
+            sensirion_i2c_hal_sleep_usec(I2C_HAL_RETRY_DELAY_US);
+        }
+    }
 
-    return status;
+    ESP_LOGW(TAG, "I2C read (0x%02x, %u B) failed after %u attempts: %s", address,
+             (unsigned)count, (unsigned)I2C_HAL_MAX_ATTEMPTS, esp_err_to_name(status));
+    return I2C_NACK_ERROR;
 }
 
 /**
@@ -118,13 +152,27 @@ int8_t sensirion_i2c_hal_read(uint8_t address, uint8_t* data, uint8_t count)
  */
 int8_t sensirion_i2c_hal_write(uint8_t address, const uint8_t* data, uint8_t count)
 {
-    if (dev_handle == NULL)
-        dev_handle = sensirion_i2c_hal_add_device(address);
+    if (hal_ensure_device(address) != ESP_OK) {
+        return I2C_BUS_ERROR;
+    }
 
-    esp_err_t status = i2c_master_transmit(dev_handle, data, count, -1);
-    ESP_ERROR_CHECK(status);
+    esp_err_t status = ESP_FAIL;
+    for (uint8_t attempt = 1; attempt <= I2C_HAL_MAX_ATTEMPTS; attempt++) {
+        status = i2c_master_transmit(dev_handle, data, count, I2C_HAL_TXN_TIMEOUT_MS);
+        if (status == ESP_OK) {
+            return NO_ERROR;
+        }
+        ESP_LOGD(TAG, "I2C write (0x%02x, %u B) attempt %u/%u failed: %s", address,
+                 (unsigned)count, (unsigned)attempt, (unsigned)I2C_HAL_MAX_ATTEMPTS,
+                 esp_err_to_name(status));
+        if (attempt < I2C_HAL_MAX_ATTEMPTS) {
+            sensirion_i2c_hal_sleep_usec(I2C_HAL_RETRY_DELAY_US);
+        }
+    }
 
-    return status;
+    ESP_LOGW(TAG, "I2C write (0x%02x, %u B) failed after %u attempts: %s", address,
+             (unsigned)count, (unsigned)I2C_HAL_MAX_ATTEMPTS, esp_err_to_name(status));
+    return I2C_NACK_ERROR;
 }
 
 /**
