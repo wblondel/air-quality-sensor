@@ -114,6 +114,11 @@ static constexpr int32_t kSettingsTimeoutSec = 30;   // settings page saves and 
 
 // Written from the Matter thread when the commissioning window opens
 static volatile int32_t s_pairingCloseAtSec = 0;
+// Written from the Matter thread while the Identify cluster is active
+static volatile int32_t s_identifyEndSec = 0;
+static esp_timer_handle_t s_identifyBlinkTimer = nullptr;
+static bool s_identifyLedOn = false;
+static bool s_identifyPageDrawn = false;
 static int32_t s_lastActivitySec = 0;
 static int32_t s_lastRotateSec = 0;
 static bool s_autoRotate = true;
@@ -331,6 +336,19 @@ static void RenderDisplay()
         return;
     }
 
+    if (now < s_identifyEndSec) {
+        if (!s_identifyPageDrawn) {
+            lcd->WriteLine(0, "");
+            lcd->WriteLine(1, "     Identify!");
+            lcd->WriteLine(2, "  LED is blinking");
+            s_identifyPageDrawn = true;
+        }
+        snprintf(line, sizeof(line), "Ends in %ds", (int)(s_identifyEndSec - now));
+        lcd->WriteLine(3, line);
+        return;
+    }
+    s_identifyPageDrawn = false;
+
     if (now < s_pairingCloseAtSec) {
         if (!s_pairingPageDrawn) {
             lcd->WriteLine(0, "Matter pairing open");
@@ -498,6 +516,98 @@ static void ShowMessage(const char* text, int32_t seconds)
     s_messageEndSec = NowSec() + seconds;
     s_messageDrawn = false;
     RenderDisplay();
+}
+
+/*
+ * Identify cluster: HA's "Identify" button (on any of the endpoints) makes
+ * the LED blink and the LCD show a banner so the device can be spotted.
+ * Requests arrive on the Matter thread; the LCD is only touched from the
+ * esp_timer task, which picks the state up through s_identifyEndSec -- the
+ * same pattern as the pairing page.
+ */
+
+static void StartIdentifyIndication(int32_t seconds)
+{
+    s_identifyEndSec = NowSec() + seconds;
+    if (s_identifyBlinkTimer != nullptr) {
+        esp_timer_stop(s_identifyBlinkTimer); // no-op unless already blinking
+        esp_timer_start_periodic(s_identifyBlinkTimer, 500000);
+    }
+}
+
+static void StopIdentifyIndication()
+{
+    s_identifyEndSec = 0;
+    if (s_identifyBlinkTimer != nullptr) {
+        esp_timer_stop(s_identifyBlinkTimer);
+    }
+    // Reapply the Matter attribute state the blinking trampled on
+    chip::DeviceLayer::SystemLayer().ScheduleLambda([]() {
+        if (matterExtendedColorLight) {
+            matterExtendedColorLight->Initialize();
+        }
+    });
+}
+
+static void IdentifyBlinkTimerCallback(void *arg)
+{
+    if (NowSec() >= s_identifyEndSec) {
+        StopIdentifyIndication(); // deadline passed without a STOP callback
+        return;
+    }
+    s_identifyLedOn = !s_identifyLedOn;
+    if (matterExtendedColorLight) {
+        matterExtendedColorLight->SetIdentifyBlink(s_identifyLedOn);
+    }
+}
+
+esp_err_t app_identification_handle(identification::callback_type_t type, uint16_t endpoint_id,
+                                    uint8_t effect_id, uint8_t effect_variant)
+{
+    switch (type) {
+    case identification::START: {
+        // IdentifyTime holds the requested duration; the identify server also
+        // sends STOP when it expires, the deadline is only a safety net
+        uint16_t seconds = 15;
+        attribute_t* attr = attribute::get(endpoint_id, Identify::Id, Identify::Attributes::IdentifyTime::Id);
+        if (attr != nullptr) {
+            esp_matter_attr_val_t val = esp_matter_invalid(nullptr);
+            if (attribute::get_val(attr, &val) == ESP_OK && val.val.u16 > 0) {
+                seconds = val.val.u16;
+            }
+        }
+        ESP_LOGI(TAG, "Identify start on endpoint %u for %u s", endpoint_id, seconds);
+        StartIdentifyIndication(seconds);
+        break;
+    }
+    case identification::STOP:
+        ESP_LOGI(TAG, "Identify stop on endpoint %u", endpoint_id);
+        StopIdentifyIndication();
+        break;
+    case identification::EFFECT:
+        ESP_LOGI(TAG, "Identify effect 0x%02X on endpoint %u", effect_id, endpoint_id);
+        switch ((Identify::EffectIdentifierEnum)effect_id) {
+        case Identify::EffectIdentifierEnum::kBreathe:
+            StartIdentifyIndication(15);
+            break;
+        case Identify::EffectIdentifierEnum::kChannelChange:
+            StartIdentifyIndication(8);
+            break;
+        case Identify::EffectIdentifierEnum::kFinishEffect:
+            if (s_identifyEndSec > 0) {
+                StartIdentifyIndication(1); // wrap up the running effect
+            }
+            break;
+        case Identify::EffectIdentifierEnum::kStopEffect:
+            StopIdentifyIndication();
+            break;
+        default: // kBlink, kOkay and anything unknown: a short blink burst
+            StartIdentifyIndication(2);
+            break;
+        }
+        break;
+    }
+    return ESP_OK;
 }
 
 static void OpenSettings()
@@ -858,6 +968,15 @@ static void DisplayTickCallback(void *arg)
 
     int32_t now = NowSec();
 
+    if (now < s_identifyEndSec) {
+        s_lastActivitySec = now; // keep the display on while identifying
+        if (!lcd->IsBacklightOn()) {
+            lcd->SetBacklight(true);
+            RenderDisplay();               // draw the banner while still blanked
+            lcd->SetDisplayVisible(true);  // then reveal it
+        }
+    }
+
     if (s_settingsOpen) {
         if (now - s_lastActivitySec >= kSettingsTimeoutSec) {
             ApplyAndCloseSettings(); // idle timeout saves and leaves the menu
@@ -865,7 +984,7 @@ static void DisplayTickCallback(void *arg)
         return;
     }
 
-    bool overlayActive = now < s_messageEndSec || now < s_pairingCloseAtSec;
+    bool overlayActive = now < s_messageEndSec || now < s_pairingCloseAtSec || now < s_identifyEndSec;
     static bool s_overlayWasActive = false;
 
     if (lcd->IsBacklightOn() && !overlayActive && now - s_lastActivitySec >= kBacklightTimeoutSec) {
@@ -916,6 +1035,22 @@ static void StartDisplayTimer()
     esp_timer_handle_t handle = nullptr;
     if (esp_timer_create(&timer_args, &handle) == ESP_OK) {
         esp_timer_start_periodic(handle, 1000000);
+    }
+}
+
+static void CreateIdentifyBlinkTimer()
+{
+    esp_timer_create_args_t timer_args = {
+        .callback = &IdentifyBlinkTimerCallback,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "identify_blink",
+        .skip_unhandled_events = true,
+    };
+
+    esp_err_t err = esp_timer_create(&timer_args, &s_identifyBlinkTimer);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create identify blink timer: %s", esp_err_to_name(err));
     }
 }
 
@@ -981,6 +1116,7 @@ extern "C" void app_main()
 
     RegisterUiButtons();
     StartDisplayTimer();
+    CreateIdentifyBlinkTimer();
 
     // Create Matter Air Quality Sensor Endpoint
     matterAirQualitySensor = MatterAirQualitySensor::CreateEndpoint(matterNode, airQualitySensor, matterExtendedColorLight);

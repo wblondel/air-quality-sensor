@@ -21,6 +21,7 @@ std::shared_ptr<MatterTemperatureSensor> MatterTemperatureSensor::CreateEndpoint
 {
     // Create Temperature Endpoint
     esp_matter::endpoint::temperature_sensor::config_t temperature_config;
+    temperature_config.identify.identify_type = (uint8_t)Identify::IdentifyTypeEnum::kVisibleIndicator;
     endpoint_t* endpoint = esp_matter::endpoint::temperature_sensor::create(matterNode->GetNode(), &temperature_config, ENDPOINT_FLAG_NONE, NULL);
     ABORT_APP_ON_FAILURE(endpoint != nullptr, ESP_LOGE(TAG, "Failed to create temperature sensor endpoint"));
     

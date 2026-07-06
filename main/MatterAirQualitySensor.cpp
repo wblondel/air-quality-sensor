@@ -36,6 +36,7 @@ std::shared_ptr<MatterAirQualitySensor> MatterAirQualitySensor::CreateEndpoint(
 {
     // Create Air Quality Endpoint
     esp_matter::endpoint::air_quality_sensor::config_t air_quality_config;
+    air_quality_config.identify.identify_type = (uint8_t)Identify::IdentifyTypeEnum::kVisibleIndicator;
 
     endpoint_t* endpoint = air_quality_sensor::create(matterNode->GetNode(), &air_quality_config, ENDPOINT_FLAG_NONE, NULL);
     ABORT_APP_ON_FAILURE(endpoint != nullptr, ESP_LOGE(TAG, "Failed to create air quality sensor endpoint"));

@@ -21,6 +21,7 @@ std::shared_ptr<MatterHumiditySensor> MatterHumiditySensor::CreateEndpoint(
 {
     // Create Humidity Endpoint
     esp_matter::endpoint::humidity_sensor::config_t humidity_config;
+    humidity_config.identify.identify_type = (uint8_t)Identify::IdentifyTypeEnum::kVisibleIndicator;
     endpoint_t* endpoint = esp_matter::endpoint::humidity_sensor::create(matterNode->GetNode(), &humidity_config, ENDPOINT_FLAG_NONE, NULL);
     ABORT_APP_ON_FAILURE(endpoint != nullptr, ESP_LOGE(TAG, "Failed to create humidity sensor endpoint."));
     

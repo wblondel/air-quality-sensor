@@ -35,6 +35,14 @@
 
 typedef void *app_driver_handle_t;
 
+/** Identify cluster handler (any endpoint)
+ *
+ * Blinks the LED and shows a banner on the LCD so the device can be spotted.
+ * Implemented in app_main.cpp; runs on the Matter thread.
+ */
+esp_err_t app_identification_handle(esp_matter::identification::callback_type_t type, uint16_t endpoint_id,
+                                    uint8_t effect_id, uint8_t effect_variant);
+
 /** Initialize the light driver
  *
  * This initializes the light driver associated with the selected board.

@@ -2,6 +2,7 @@
 #include <esp_openthread.h>
 #include <app/server/CommissioningWindowManager.h>
 #include <app/server/Server.h>
+#include <app_priv.h>
 
 using namespace esp_matter::attribute;
 using namespace chip::app::Clusters;
@@ -22,7 +23,7 @@ static esp_err_t app_identification_cb(identification::callback_type_t type, uin
                                        uint8_t effect_variant, void *priv_data)
 {
     ESP_LOGI(TAG, "Identification callback: type: %u, effect: %u, variant: %u", type, effect_id, effect_variant);
-    return ESP_OK;
+    return app_identification_handle(type, endpoint_id, effect_id, effect_variant);
 }
 
 // This callback is called for every attribute update. The callback implementation shall

@@ -28,6 +28,10 @@ public:
 
     void SetLightColorHSV(uint8_t hue, uint8_t saturation);
 
+    // Drives the LED directly for the Identify cluster, without touching the
+    // Matter attribute state; Initialize() puts the attribute state back
+    void SetIdentifyBlink(bool on);
+
     esp_err_t HandleAttributePreUpdate(uint32_t cluster_id, uint32_t attribute_id,
                                     esp_matter_attr_val_t* val, void *priv_data) override;
 

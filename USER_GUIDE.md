@@ -188,6 +188,9 @@ window soon"; orange/red means "open a window now".
   PM10, VOC index and NOx index — each with current value, plus 1-hour average and
   peak values for the concentrations.
 - **Temperature** and **humidity** sensors.
+- An **Identify** button — pressing it makes the LED blink for 15 seconds and the
+  LCD show an "Identify!" banner (waking the backlight if needed), so you can tell
+  which physical device this is. Afterwards the LED returns to its normal state.
 
 All values refresh once per minute.
 

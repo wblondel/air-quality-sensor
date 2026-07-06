@@ -23,6 +23,7 @@ std::shared_ptr<MatterExtendedColorLight> MatterExtendedColorLight::CreateEndpoi
     }
 
     extended_color_light::config_t light_config;
+    light_config.identify.identify_type = (uint8_t)Identify::IdentifyTypeEnum::kLightOutput;
     light_config.on_off_lighting.start_up_on_off = nullptr;
     light_config.level_control_lighting.start_up_current_level = nullptr;
     light_config.color_control.color_mode = (uint8_t)ColorControl::ColorMode::kCurrentHueAndCurrentSaturation;
@@ -107,6 +108,11 @@ esp_err_t MatterExtendedColorLight::Initialize()
     err |= m_matterRGBLEDDriver->SetPower(onOff);
 
     return err;
+}
+
+void MatterExtendedColorLight::SetIdentifyBlink(bool on)
+{
+    m_matterRGBLEDDriver->SetPower(on);
 }
 
 esp_err_t MatterExtendedColorLight::HandleAttributePreUpdate(
