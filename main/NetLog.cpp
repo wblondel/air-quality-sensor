@@ -54,15 +54,14 @@ int LogVprintf(const char* fmt, va_list args)
         int n = vsnprintf(line, sizeof(line), fmt, net_args);
         va_end(net_args);
         if (n > 0) {
-            size_t len;
-            if (n < (int)sizeof(line)) {
-                len = (size_t)n; // whole line, including its trailing '\n'
-            } else {
-                // Truncated (e.g. a very long CHIP transport line): the original
-                // newline was cut off, so force one at the end to keep this line
-                // from running into the next one.
-                len = sizeof(line) - 1;
-                line[len - 1] = '\n';
+            // Content actually written (vsnprintf caps output at sizeof-1).
+            size_t len = (n < (int)sizeof(line)) ? (size_t)n : (sizeof(line) - 1);
+            // Guarantee newline termination. ESP_LOG lines already end in '\n';
+            // this adds one to lines that don't (some CHIP/platform logs) and to
+            // truncated lines, so consecutive entries never run together.
+            if (len == 0 || line[len - 1] != '\n') {
+                line[len] = '\n'; // len <= sizeof-1, so this index is in-bounds
+                len++;
             }
             // Non-blocking (0 ticks): the line is dropped if the buffer is full.
             xRingbufferSend(s_ringbuf, line, len, 0);
@@ -77,16 +76,35 @@ int LogVprintf(const char* fmt, va_list args)
 // blocking when the socket buffer is full (slow reader / congested mesh).
 void ServeClient(int client)
 {
+    // Blocking sends with a timeout. The netlog task may block here, which is
+    // fine: the loggers are shielded by the ring buffer (drop-on-full at
+    // enqueue), not by this task. The timeout drops a wedged client so a stuck
+    // reader can't hold the task forever. Whole lines are always sent in full so
+    // they are never cut mid-content.
+    struct timeval tv;
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
     while (s_enabled.load(std::memory_order_relaxed)) {
         size_t item_size = 0;
-        void* item = xRingbufferReceive(s_ringbuf, &item_size, pdMS_TO_TICKS(500));
+        char* item = (char*)xRingbufferReceive(s_ringbuf, &item_size, pdMS_TO_TICKS(500));
         if (item == nullptr) {
-            continue; // timeout: no new logs; keep the connection open
+            continue; // no new logs; keep the connection open
         }
-        int sent = send(client, item, item_size, MSG_DONTWAIT);
+        bool ok = true;
+        for (size_t off = 0; off < item_size;) {
+            int sent = send(client, item + off, item_size - off, 0);
+            if (sent > 0) {
+                off += (size_t)sent;
+            } else {
+                ok = false; // error or send timeout -> client gone/stuck
+                break;
+            }
+        }
         vRingbufferReturnItem(s_ringbuf, item);
-        if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            break; // client gone (EPIPE/ECONNRESET/...)
+        if (!ok) {
+            break;
         }
     }
 }
