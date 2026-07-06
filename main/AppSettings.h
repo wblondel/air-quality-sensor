@@ -15,6 +15,7 @@ struct AppSettings {
     uint16_t altitudeMeters = 25; // CO2 pressure-compensation altitude
     uint8_t rotateSeconds = 7;    // display auto-rotation period
     bool autoRotate = true;
+    bool netlogEnabled = false;   // stream logs over Thread (debug), off by default
 
     void Load();
     void Save() const;

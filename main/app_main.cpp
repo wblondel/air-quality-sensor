@@ -44,6 +44,7 @@ using namespace chip::DeviceLayer;
 #include "SensirionSEN66.h"
 #include "LCD2004.h"
 #include "AppSettings.h"
+#include "NetLog.h"
 
 #include <driver/i2c_master.h>
 #include <cmath>
@@ -135,6 +136,7 @@ enum SettingsField {
     kFieldAltitude,
     kFieldRotatePeriod,
     kFieldAutoRotate,
+    kFieldDebugLog,
     kSettingsFieldCount,
 };
 static bool s_settingsOpen = false;
@@ -281,7 +283,7 @@ static void FormatRefreshValue(char* out, size_t size, uint32_t seconds)
 static void RenderSettingsPage()
 {
     static const char* const kLabels[kSettingsFieldCount] = {
-        "Refresh", "Altitude", "Rotate every", "Auto-rotate"
+        "Refresh", "Altitude", "Rotate every", "Auto-rotate", "Debug log"
     };
 
     lcd->WriteLine(0, "Settings");
@@ -303,6 +305,9 @@ static void RenderSettingsPage()
             break;
         case kFieldAutoRotate:
             snprintf(value, sizeof(value), "%s", s_editSettings.autoRotate ? "ON" : "OFF");
+            break;
+        case kFieldDebugLog:
+            snprintf(value, sizeof(value), "%s", s_editSettings.netlogEnabled ? "ON" : "OFF");
             break;
         }
         char line[36]; // WriteLine truncates to the 20 columns
@@ -629,7 +634,12 @@ static void ApplyAndCloseSettings()
     bool changed = s_editSettings.refreshSeconds != s_settings.refreshSeconds ||
                    s_editSettings.altitudeMeters != s_settings.altitudeMeters ||
                    s_editSettings.rotateSeconds != s_settings.rotateSeconds ||
-                   s_editSettings.autoRotate != s_settings.autoRotate;
+                   s_editSettings.autoRotate != s_settings.autoRotate ||
+                   s_editSettings.netlogEnabled != s_settings.netlogEnabled;
+
+    if (s_editSettings.netlogEnabled != s_settings.netlogEnabled) {
+        NetLog::SetEnabled(s_editSettings.netlogEnabled);
+    }
 
     if (s_editSettings.refreshSeconds != s_settings.refreshSeconds && sensor_timer_handle) {
         esp_timer_stop(sensor_timer_handle);
@@ -696,6 +706,9 @@ static void StepSettingsField(int direction)
     }
     case kFieldAutoRotate:
         s_editSettings.autoRotate = !s_editSettings.autoRotate;
+        break;
+    case kFieldDebugLog:
+        s_editSettings.netlogEnabled = !s_editSettings.netlogEnabled;
         break;
     default:
         break;
@@ -1101,6 +1114,10 @@ extern "C" void app_main()
     s_settings.Load();
     s_autoRotate = s_settings.autoRotate;
 
+    /* Install the network-log tee early so it can capture boot logs once the
+     * server is enabled (below, after the Thread stack is up). */
+    NetLog::Init();
+
     /* Initialize driver */
     app_driver_handle_t button_handle = app_driver_button_init();
     app_reset_button_register(button_handle);
@@ -1168,6 +1185,9 @@ extern "C" void app_main()
     /* Matter start */
     err = matterNode->StartMatter();
     ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to start Matter, err:%d", err));
+
+    /* The Thread netif is up now; start the log server if it was left enabled. */
+    NetLog::SetEnabled(s_settings.netlogEnabled);
 
     StartUpdateSensorsTimer();
 

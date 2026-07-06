@@ -40,6 +40,9 @@ void AppSettings::Load()
     if (nvs_get_u8(handle, "autorot", &u8) == ESP_OK) {
         autoRotate = u8 != 0;
     }
+    if (nvs_get_u8(handle, "netlog", &u8) == ESP_OK) {
+        netlogEnabled = u8 != 0;
+    }
     nvs_close(handle);
 
     ESP_LOGI(TAG, "Loaded: refresh %us, altitude %um, rotate %us (%s)",
@@ -59,6 +62,7 @@ void AppSettings::Save() const
     nvs_set_u16(handle, "altitude", altitudeMeters);
     nvs_set_u8(handle, "rotate", rotateSeconds);
     nvs_set_u8(handle, "autorot", autoRotate ? 1 : 0);
+    nvs_set_u8(handle, "netlog", netlogEnabled ? 1 : 0);
 
     err = nvs_commit(handle);
     if (err != ESP_OK) {
