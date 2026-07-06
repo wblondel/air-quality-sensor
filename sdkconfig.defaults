@@ -37,7 +37,7 @@ CONFIG_CHIP_OTA_IMAGE_BUILD=y
 
 # Numeric software version reported over Matter; must stay in sync with
 # PROJECT_VER_NUMBER in CMakeLists.txt (scripts/release.sh bumps both)
-CONFIG_DEVICE_SOFTWARE_VERSION_NUMBER=1
+CONFIG_DEVICE_SOFTWARE_VERSION_NUMBER=3
 
 # Enable HKDF in mbedtls
 CONFIG_MBEDTLS_HKDF_C=y
