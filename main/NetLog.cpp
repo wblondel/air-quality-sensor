@@ -21,7 +21,7 @@ const char* TAG = "NetLog";
 // untouched; promote to Kconfig if per-build configuration is ever needed.
 constexpr uint16_t kPort = 2333;        // idf.py monitor -p 'socket://[<ipv6>]:2333'
 constexpr size_t kRingBufSize = 4096;   // bytes of log buffered awaiting send
-constexpr size_t kLineMax = 192;        // max bytes captured per log line
+constexpr size_t kLineMax = 256;        // max bytes captured per log line
 constexpr int kBacklog = 1;             // single client at a time
 
 std::atomic<bool> s_enabled{false};
@@ -54,7 +54,16 @@ int LogVprintf(const char* fmt, va_list args)
         int n = vsnprintf(line, sizeof(line), fmt, net_args);
         va_end(net_args);
         if (n > 0) {
-            size_t len = (n < (int)sizeof(line)) ? (size_t)n : sizeof(line) - 1;
+            size_t len;
+            if (n < (int)sizeof(line)) {
+                len = (size_t)n; // whole line, including its trailing '\n'
+            } else {
+                // Truncated (e.g. a very long CHIP transport line): the original
+                // newline was cut off, so force one at the end to keep this line
+                // from running into the next one.
+                len = sizeof(line) - 1;
+                line[len - 1] = '\n';
+            }
             // Non-blocking (0 ticks): the line is dropped if the buffer is full.
             xRingbufferSend(s_ringbuf, line, len, 0);
         }
